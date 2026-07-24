@@ -1,0 +1,43 @@
+campusgrid.sahuja.in {
+    encode gzip
+
+    # Routes to FastAPI Backend
+    handle /api/v1/* {
+        reverse_proxy server:8000
+    }
+
+    handle /ws/* {
+        reverse_proxy server:8000
+    }
+
+    handle /docs* {
+        reverse_proxy server:8000
+    }
+
+    handle /redoc* {
+        reverse_proxy server:8000
+    }
+
+    handle /health {
+        reverse_proxy server:8000
+    }
+
+    handle /metrics {
+        reverse_proxy server:8000
+    }
+
+    # Routes to MinIO Web Console
+    handle /minio/* {
+        reverse_proxy minio:9001
+    }
+
+    # All other routes go to Next.js Web App
+    handle {
+        reverse_proxy web:3000
+    }
+}
+
+s3.campusgrid.sahuja.in {
+    # Public S3 endpoint for presigned URLs (contributor node file access)
+    reverse_proxy minio:9000
+}

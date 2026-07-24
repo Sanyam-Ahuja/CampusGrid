@@ -1,0 +1,209 @@
+version: "3.9"
+
+services:
+  # --- Reverse Proxy & SSL Auto-Manager ---
+  caddy:
+    image: caddy:2-alpine
+    container_name: campugrid-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.prod:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - server
+      - web
+      - minio
+
+  # --- Database ---
+  postgres:
+    image: postgres:16-alpine
+    container_name: campugrid-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-campugrid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-campugrid_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-campugrid}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-campugrid}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --- Redis Queue ---
+  redis:
+    image: redis:7-alpine
+    container_name: campugrid-redis
+    restart: always
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --save 60 1000
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --- S3 Object Storage ---
+  minio:
+    image: minio/minio:latest
+    container_name: campugrid-minio
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-campugrid}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-campugrid_dev_secret}
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Private Docker Registry for Contributor Containers ---
+  registry:
+    image: registry:2
+    container_name: campugrid-registry
+    restart: always
+    volumes:
+      - registrydata:/var/lib/registry
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+
+  # --- Backend REST & WS Gateway ---
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: campugrid-server
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_SECURE=false
+      - PUBLIC_MINIO_ENDPOINT=s3.campusgrid.sahuja.in
+      - PUBLIC_MINIO_SECURE=true
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - CORS_ORIGINS=["https://campusgrid.sahuja.in"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # --- Celery Worker ---
+  celery_worker:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: campugrid-celery-worker
+    restart: always
+    command: celery -A app.celery_worker.celery_app worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_SECURE=false
+      - PUBLIC_MINIO_ENDPOINT=s3.campusgrid.sahuja.in
+      - PUBLIC_MINIO_SECURE=true
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # --- Celery Beat (Watchdog Scheduler) ---
+  celery_beat:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: campugrid-celery-beat
+    restart: always
+    command: celery -A app.celery_worker.celery_app beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://redis:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_SECURE=false
+      - PUBLIC_MINIO_ENDPOINT=s3.campusgrid.sahuja.in
+      - PUBLIC_MINIO_SECURE=true
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # --- Next.js Consumer Web App ---
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=https://campusgrid.sahuja.in/api/v1
+        - NEXT_PUBLIC_WS_URL=wss://campusgrid.sahuja.in
+    container_name: campugrid-web
+    restart: always
+    depends_on:
+      - server
+
+  # --- Monitoring (Prometheus) ---
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: campugrid-prometheus
+    restart: always
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    depends_on:
+      - server
+
+  # --- Dashboarding (Grafana) ---
+  grafana:
+    image: grafana/grafana:latest
+    container_name: campugrid-grafana
+    restart: always
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-campugrid_grafana}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafanadata:/var/lib/grafana
+
+  # --- Log Aggregator (Loki) ---
+  loki:
+    image: grafana/loki:latest
+    container_name: campugrid-loki
+    restart: always
+    command: -config.file=/etc/loki/local-config.yaml
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  registrydata:
+  promdata:
+  grafanadata:
+  caddy_data:
+  caddy_config:

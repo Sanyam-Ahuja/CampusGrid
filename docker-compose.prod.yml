@@ -58,6 +58,9 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-campugrid}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-campugrid_dev_secret}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - miniodata:/data
     healthcheck:
@@ -71,6 +74,8 @@ services:
     image: registry:2
     container_name: campugrid-registry
     restart: always
+    ports:
+      - "127.0.0.1:5000:5000"
     volumes:
       - registrydata:/var/lib/registry
     environment:
@@ -83,6 +88,8 @@ services:
       dockerfile: Dockerfile
     container_name: campugrid-server
     restart: always
+    ports:
+      - "127.0.0.1:8000:8000"
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379/0
@@ -163,6 +170,8 @@ services:
         - NEXT_PUBLIC_WS_URL=wss://campusgrid.sahuja.in
     container_name: campugrid-web
     restart: always
+    ports:
+      - "127.0.0.1:3000:3000"
     depends_on:
       - server
 

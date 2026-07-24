@@ -140,7 +140,7 @@ export default function ResultsPage() {
               <div className="space-y-6">
                  <div className="flex justify-between items-center">
                     <span className="text-slate-500 font-bold uppercase tracking-widest text-[10px]">Total Cost</span>
-                    <span className="text-2xl font-black text-white">₹{(totalCost).toFixed(2)}</span>
+                    <span className="text-2xl font-black text-white">${(totalCost).toFixed(2)}</span>
                  </div>
                  
                  <div className="h-px bg-slate-800" />

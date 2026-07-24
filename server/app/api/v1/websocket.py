@@ -110,6 +110,23 @@ async def ws_node_connection(
         await websocket.close(code=4001, reason="Authentication failed")
         return
 
+    # Authorization: the node must belong to the authenticated user. Otherwise a
+    # valid token could connect as ANY node_id and flip its state / report status.
+    try:
+        from sqlalchemy import select as _sa_select
+        from app.core.database import async_session as _async_session
+        from app.models.node import Node as _NodeModel
+        async with _async_session() as _db:
+            _node = (await _db.execute(_sa_select(_NodeModel).where(_NodeModel.id == node_id))).scalar_one_or_none()
+        if _node is None or str(_node.user_id) != str(user_id):
+            logger.warning(f"Node {node_id} ownership check failed for user {user_id}")
+            await websocket.close(code=4003, reason="Node does not belong to this user")
+            return
+    except Exception as e:
+        logger.warning(f"Node {node_id} ownership check error: {e}")
+        await websocket.close(code=4003, reason="Authorization failed")
+        return
+
     await ws_manager.connect_node(node_id, websocket)
 
     # Mark node online in pg database immediately
@@ -235,12 +252,29 @@ async def ws_job_monitor(
         from app.core.security import decode_token
         payload = decode_token(token)
         user_id = payload.get("sub")
+        role = payload.get("role")
         if not user_id:
             await websocket.close(code=4001, reason="Invalid token")
             return
     except Exception as e:
         logger.warning(f"Job WS auth failed for {job_id}: {e}")
         await websocket.close(code=4001, reason="Authentication failed")
+        return
+
+    # Authorization: only the job's owner (or an admin) may watch it.
+    try:
+        from sqlalchemy import select as _sa_select
+        from app.core.database import async_session as _async_session
+        from app.models.job import Job as _JobModel
+        async with _async_session() as _db:
+            _job = (await _db.execute(_sa_select(_JobModel).where(_JobModel.id == job_id))).scalar_one_or_none()
+        if _job is None or (str(_job.user_id) != str(user_id) and role != "admin"):
+            logger.warning(f"Job WS ownership check failed: job {job_id} user {user_id}")
+            await websocket.close(code=4003, reason="Not authorized for this job")
+            return
+    except Exception as e:
+        logger.warning(f"Job WS ownership check error for {job_id}: {e}")
+        await websocket.close(code=4003, reason="Authorization failed")
         return
 
     await ws_manager.connect_customer(job_id, websocket)

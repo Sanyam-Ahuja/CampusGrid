@@ -17,6 +17,20 @@ minio_client = Minio(
     secure=settings.MINIO_SECURE,
 )
 
+# Separate client used ONLY to sign presigned URLs with the public-facing host.
+# SigV4 signs the Host header, so a URL meant for `s3.example.com` must be signed
+# by a client whose endpoint is `s3.example.com`. This client never opens a
+# connection (presigning is offline), so it is safe even though the host is not
+# reachable from inside the server's network.
+_public_endpoint = settings.PUBLIC_MINIO_ENDPOINT or settings.MINIO_ENDPOINT
+_public_secure = settings.PUBLIC_MINIO_SECURE if settings.PUBLIC_MINIO_ENDPOINT else settings.MINIO_SECURE
+presign_client = Minio(
+    _public_endpoint,
+    access_key=settings.MINIO_ACCESS_KEY,
+    secret_key=settings.MINIO_SECRET_KEY,
+    secure=_public_secure,
+)
+
 REQUIRED_BUCKETS = [
     settings.BUCKET_JOB_INPUTS,
     settings.BUCKET_JOB_OUTPUTS,
@@ -28,8 +42,10 @@ REQUIRED_BUCKETS = [
 class MinIOService:
     """High-level MinIO operations for CampuGrid."""
 
-    def __init__(self, client: Minio | None = None):
+    def __init__(self, client: Minio | None = None, presign: Minio | None = None):
         self.client = client or minio_client
+        # Client used for presigned URL generation (public host).
+        self.presign = presign or presign_client
 
     def ensure_buckets(self) -> None:
         """Create required buckets if they don't exist. Called on server startup."""
@@ -77,8 +93,8 @@ class MinIOService:
         key: str,
         expiry_hours: int = 4,
     ) -> str:
-        """Generate a presigned download URL."""
-        return self.client.presigned_get_object(
+        """Generate a presigned download URL (signed with the public host)."""
+        return self.presign.presigned_get_object(
             bucket_name=bucket,
             object_name=key,
             expires=timedelta(hours=expiry_hours),
@@ -90,8 +106,8 @@ class MinIOService:
         key: str,
         expiry_hours: int = 4,
     ) -> str:
-        """Generate a presigned upload URL."""
-        return self.client.presigned_put_object(
+        """Generate a presigned upload URL (signed with the public host)."""
+        return self.presign.presigned_put_object(
             bucket_name=bucket,
             object_name=key,
             expires=timedelta(hours=expiry_hours),

@@ -30,6 +30,11 @@ class JobProfile:
     confidence: float
     entry_file: str
     imports: list[str] = None
+    # MinIO key of a user-supplied Dockerfile, if one was uploaded alongside the
+    # workload. When set, the orchestrator uses its FROM base + RUN lines as the
+    # container image + setup instead of the catalog/Gemini path.
+    custom_dockerfile: str | None = None
+    requires_public_network: bool = False
 
 
 # ── Analyzers ──────────────────────────────────────────────────
@@ -54,14 +59,16 @@ def analyze_blend(job_id: str, file_keys: list[str]) -> JobProfile:
 
 def analyze_python(job_id: str, file_keys: list[str]) -> JobProfile:
     """Analyze Python scripts using AST to extract imports safely."""
-    # Find the main entry point
+    # Find the main entry point. file_keys are full MinIO object keys like
+    # "{job_id}/train.py", so match on the basename rather than the whole key.
     py_files = [k for k in file_keys if k.endswith('.py')]
     entry_file = None
-    if "train.py" in py_files:
-        entry_file = "train.py"
-    elif "main.py" in py_files:
-        entry_file = "main.py"
-    elif py_files:
+    for preferred in ("train.py", "main.py"):
+        match = next((k for k in py_files if k.split("/")[-1] == preferred), None)
+        if match:
+            entry_file = match
+            break
+    if not entry_file and py_files:
         entry_file = py_files[0]
 
     if not entry_file:
@@ -263,23 +270,24 @@ def analyze_simulation(job_id: str, file_keys: list[str], detections: list[FileD
 # ── Dispatcher ─────────────────────────────────────────────────
 
 def analyze_files(job_id: str, file_keys: list[str], detections: list[FileDetection]) -> JobProfile:
-    """Determine the primary workload type based on detection results and call detailed analyzer."""
+    """Determine the primary workload type, attaching a custom Dockerfile if present."""
+    # A user-supplied Dockerfile augments a normally-detected workload: we still
+    # need to know what KIND of job this is (render/ml/data/sim) so we can split
+    # and assemble it. The Dockerfile only changes the base image + setup.
+    dockerfile_key = next((k for k in file_keys if k.split("/")[-1] == "Dockerfile"), None)
 
-    # 1. Custom Dockerfile Check (Bypasses AI Heuristics)
-    has_dockerfile = any(k.split("/")[-1] == "Dockerfile" for k in file_keys)
-    if has_dockerfile:
-        logger.info(f"Custom Dockerfile detected for job {job_id}. Bypassing AI heuristics.")
-        dockerfile_key = next(k for k in file_keys if k.split("/")[-1] == "Dockerfile")
-        return JobProfile(
-            type="custom",
-            framework="custom_docker",
-            gpu_required=False,  # Fallback to defaults, can be overridden by user specs in future
-            resources=Resources(vram_gb=0.0, ram_gb=8.0, cpu_cores=4),
-            split_params={},
-            confidence=1.0,
-            entry_file=dockerfile_key,
-        )
+    # Detect against everything except the Dockerfile itself.
+    workload_keys = [k for k in file_keys if k.split("/")[-1] != "Dockerfile"]
+    profile = _detect_profile(job_id, workload_keys, detections)
 
+    if dockerfile_key:
+        logger.info(f"Custom Dockerfile attached for job {job_id}: {dockerfile_key}")
+        profile.custom_dockerfile = dockerfile_key
+    return profile
+
+
+def _detect_profile(job_id: str, file_keys: list[str], detections: list[FileDetection]) -> JobProfile:
+    """Heuristic workload-type detection from file signatures and extensions."""
     for det in detections:
         # Blender files often use zstd compression which obscures their 'BLENDER' magic bytes.
         # We accept them even with 0.5 confidence (extension only).

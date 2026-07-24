@@ -45,6 +45,13 @@ pub fn pull_image(image: &str) -> Result<(), String> {
     }
 }
 
+/// Force-stop and remove the container for a chunk (used on job cancellation).
+pub fn cancel_workload(chunk_id: &str) -> Result<(), String> {
+    let container_name = format!("campugrid_chunk_{}", chunk_id);
+    let _ = Command::new("docker").args(["rm", "-f", &container_name]).output();
+    Ok(())
+}
+
 pub fn run_workload(
     spec: &Value,
     network_mode: &str,

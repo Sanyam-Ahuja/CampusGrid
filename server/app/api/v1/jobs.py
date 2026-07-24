@@ -148,7 +148,34 @@ async def cancel_job(
         )
 
     job.status = JobStatus.CANCELLED
-    # TODO Phase 2: Cancel running chunks on nodes via WebSocket
+
+    # Tell any nodes currently running this job's chunks to stop, and remove
+    # not-yet-finished chunks from the Redis queue's reach (the matcher/watchdog
+    # both skip chunks of a CANCELLED job).
+    from app.models.chunk import Chunk, ChunkStatus
+    chunks_res = await db.execute(
+        select(Chunk).where(
+            Chunk.job_id == job_id,
+            Chunk.status.in_([ChunkStatus.ASSIGNED, ChunkStatus.RUNNING]),
+        )
+    )
+    running_chunks = chunks_res.scalars().all()
+    if running_chunks:
+        import json as _json
+        import redis.asyncio as aioredis
+        r = aioredis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            for ch in running_chunks:
+                if ch.node_id:
+                    await r.publish("node_dispatches", _json.dumps({
+                        "type": "job_cancel",
+                        "target_node_id": str(ch.node_id),
+                        "job_id": str(job_id),
+                        "chunk_id": str(ch.id),
+                    }))
+        finally:
+            await r.aclose()
+
     await db.flush()
 
     return {"job_id": str(job_id), "status": "cancelled"}

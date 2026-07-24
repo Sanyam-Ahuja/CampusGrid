@@ -39,8 +39,8 @@ async def register_node(
         os=data.os,
         bandwidth_mbps=data.bandwidth_mbps,
         ip_address=data.ip_address,
-        status=NodeStatus.ONLINE,
-        last_heartbeat=datetime.now(UTC),
+        # Starts offline; the node's WebSocket connection flips it online.
+        status=NodeStatus.OFFLINE,
     )
     db.add(node)
     await db.flush()

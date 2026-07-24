@@ -45,6 +45,19 @@ async def send_customer_update(job_id: str, step: str, detail: str):
         logger.warning(f"Could not publish update for job {job_id}: {e}")
 
 
+async def _mark_job_failed(job_id: str):
+    """Set a job's status to FAILED (best-effort)."""
+    try:
+        async with make_celery_session() as session:
+            result = await session.execute(select(Job).where(Job.id == job_id))
+            job = result.scalar_one_or_none()
+            if job and job.status not in (JobStatus.FAILED, JobStatus.CANCELLED):
+                job.status = JobStatus.FAILED
+                await session.commit()
+    except Exception as e:
+        logger.error(f"Could not mark job {job_id} failed: {e}")
+
+
 async def process_pipeline_async(job_id: str, user_id: str):
     # Retrieve MinIO object keys
     prefix = f"{job_id}/"
@@ -112,9 +125,37 @@ async def process_pipeline_async(job_id: str, user_id: str):
         # We don't fail for internal scanner errors, but log them
         pass
 
-    # 3. Lookup Catalog
-    await send_customer_update(job_id, "catalog", "Looking for matching Pre-verified Docker Containers...")
-    cat_entry = lookup(profile)
+    # 3. Container image resolution
+    # 3a. Custom Dockerfile (user-supplied) takes precedence for python-style jobs.
+    cat_entry = None
+    if profile.custom_dockerfile and profile.type in ("ml_training", "data"):
+        await send_customer_update(job_id, "catalog", "Using your custom Dockerfile...")
+        from app.pipeline.catalog import GENERIC_PYTHON_ENTRYPOINT, parse_dockerfile
+        try:
+            df_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, profile.custom_dockerfile)
+            base_image, setup_cmds = parse_dockerfile(df_bytes.decode("utf-8", errors="ignore"))
+        except Exception as e:
+            await send_customer_update(job_id, "failed", f"Could not read your Dockerfile: {e}")
+            await _mark_job_failed(job_id)
+            return
+        if not base_image:
+            base_image = ("nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04"
+                          if profile.gpu_required else "python:3.11-slim")
+        cat_entry = CatalogEntry(
+            image=base_image,
+            entrypoint_template=GENERIC_PYTHON_ENTRYPOINT,
+            env_vars=["INPUT", "OUTPUT_PATH", "CHUNK_START", "CHUNK_END", "JOB_ID"],
+            gpu_required=profile.gpu_required,
+            preinstalled_packages=[],
+            tested=False,
+            setup_commands=setup_cmds,
+        )
+        await send_customer_update(job_id, "catalog", f"Configured from your Dockerfile (base {base_image}).")
+
+    # 3b. Tier 1 catalog lookup.
+    if cat_entry is None:
+        await send_customer_update(job_id, "catalog", "Looking for matching Pre-verified Docker Containers...")
+        cat_entry = lookup(profile)
 
     if not cat_entry:
         # Check if user has explicitly asked for AI generation or provided a custom dockerfile resolution
@@ -132,23 +173,26 @@ async def process_pipeline_async(job_id: str, user_id: str):
 
         await send_customer_update(job_id, "catalog", "Authorized: Triggering Tier 3 Gemini Code Generator...")
         try:
+            from app.pipeline.catalog import GENERIC_PYTHON_ENTRYPOINT
             generator = DockerfileGenerator()
             # Fetch script code for context
             src_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, profile.entry_file)
-            src_str = src_bytes.decode('utf-8')
+            src_str = src_bytes.decode('utf-8', errors='ignore')
 
             gen_result = await generator.generate(src_str, None, profile)
             cat_entry = CatalogEntry(
-                image=gen_result.image_tag,
-                entrypoint_template="python /workspace/{INPUT}",
+                image=gen_result.base_image,
+                entrypoint_template=GENERIC_PYTHON_ENTRYPOINT,
                 env_vars=["INPUT", "OUTPUT_PATH", "CHUNK_START", "CHUNK_END", "JOB_ID"],
                 gpu_required=profile.gpu_required,
                 preinstalled_packages=[],
-                tested=False
+                tested=False,
+                setup_commands=gen_result.setup_commands,
             )
-            await send_customer_update(job_id, "catalog", f"Generated AI Image Tag: {gen_result.image_tag}")
+            await send_customer_update(job_id, "catalog", f"Generated container config (base {gen_result.base_image}).")
         except Exception as e:
             await send_customer_update(job_id, "failed", f"Analysis error generating AI payload: {e}")
+            await _mark_job_failed(job_id)
             return
 
     else:
@@ -168,7 +212,7 @@ async def process_pipeline_async(job_id: str, user_id: str):
         if not truly_missing:
             # All imports are covered — skip Gemini entirely
             await send_customer_update(job_id, "catalog", f"Match fully verified: {cat_entry.image}")
-            v_res = type("V", (), {"compatible": True, "needs_adaptation": False, "conflicts": None, "image_tag": None})()
+            v_res = type("V", (), {"compatible": True, "needs_adaptation": False, "conflicts": None, "commands": None})()
         else:
             logger.info(f"Unknown imports for {job_id}: {truly_missing} — calling Gemini verifier")
             await send_customer_update(job_id, "catalog", f"Found Base Match {cat_entry.image}. Running AI Import Verifier...")
@@ -183,9 +227,10 @@ async def process_pipeline_async(job_id: str, user_id: str):
             )
 
         if v_res.compatible and v_res.needs_adaptation:
-            cat_entry.image = str(v_res.image_tag)
+            # Install the extra deps at container start; image stays the real base.
+            cat_entry.setup_commands = v_res.commands or ""
             cat_entry.tested = False
-            await send_customer_update(job_id, "catalog", f"Adapter configured overlay pipeline requirements. Tag: {v_res.image_tag}")
+            await send_customer_update(job_id, "catalog", "Adapter configured extra dependencies for your code.")
         elif not v_res.compatible:
             async with make_celery_session() as session:
                 result = await session.execute(select(Job).where(Job.id == job_id))
@@ -248,6 +293,7 @@ async def process_pipeline_async(job_id: str, user_id: str):
             job.total_chunks = len(chunks_data)
 
             # persist chunks
+            chunk_ids: list[str] = []
             for ch in chunks_data:
                 db_chunk = Chunk(
                     job_id=job.id,
@@ -269,12 +315,17 @@ async def process_pipeline_async(job_id: str, user_id: str):
                 )
                 session.add(db_chunk)
                 await session.flush()
-                # Trigger Scheduler: Push to Redis + Notify Matcher
-                await redis_svc.push_chunk(str(db_chunk.id))
-                from app.scheduler.matcher import dispatch_chunk
-                dispatch_chunk.delay(str(db_chunk.id))
+                chunk_ids.append(str(db_chunk.id))
 
+            # Commit chunk rows BEFORE enqueueing/dispatching. Celery workers run
+            # in a separate process; if we dispatch before commit, the worker can
+            # look up the chunk, find nothing, and silently drop the dispatch.
             await session.commit()
+
+            from app.scheduler.matcher import dispatch_chunk
+            for cid in chunk_ids:
+                await redis_svc.push_chunk(cid)
+                dispatch_chunk.delay(cid)
 
         # Emit completion message to unblock the frontend and display the JobProfileCard
         import json

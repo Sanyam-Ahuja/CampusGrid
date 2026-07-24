@@ -23,14 +23,24 @@ class ChunkSpec:
 def compute_chunks(profile: JobProfile, available_nodes: int, catalog_entry, requires_public_network: bool, job_id: str) -> list[ChunkSpec]:
     profile.requires_public_network = requires_public_network
     if profile.type == "render":
-        return split_render(profile, available_nodes, catalog_entry, job_id)
+        chunks = split_render(profile, available_nodes, catalog_entry, job_id)
     elif profile.type == "ml_training":
-        return split_ml(profile, available_nodes, catalog_entry, job_id)
+        chunks = split_ml(profile, available_nodes, catalog_entry, job_id)
     elif profile.type == "data":
-        return split_data(profile, available_nodes, catalog_entry, job_id)
+        chunks = split_data(profile, available_nodes, catalog_entry, job_id)
     elif profile.type == "simulation":
-        return split_simulation(profile, available_nodes, catalog_entry, job_id) if hasattr(profile, 'type') else []
-    return []
+        chunks = split_simulation(profile, available_nodes, catalog_entry, job_id)
+    else:
+        chunks = []
+
+    # Prepend any runtime dependency-install commands (Tier-2 adapter / Tier-3
+    # generator / custom Dockerfile) so they run inside the container before the
+    # workload. This is what lets us use real base images with no registry.
+    setup = (getattr(catalog_entry, "setup_commands", "") or "").strip()
+    if setup:
+        for c in chunks:
+            c.command = f"{setup} && {c.command}"
+    return chunks
 
 def split_render(profile: JobProfile, available_nodes: int, catalog_entry, job_id: str) -> list[ChunkSpec]:
     """Frame-range parallelism for rendering workloads."""
@@ -126,13 +136,32 @@ def split_ml(profile: JobProfile, available_nodes: int, catalog_entry, job_id: s
 
 def split_data(profile: JobProfile, available_nodes: int, catalog_entry, job_id: str) -> list[ChunkSpec]:
     """Shard CSV/Parquet by byte ranges for map-reduce processing."""
+    from app.services.minio_service import minio_service
+    from app.core.config import get_settings
+    settings = get_settings()
+
     file_size = profile.split_params.get("file_size", 0)
     if file_size <= 0:
+        # Single-shard fallback: build the command the same way the multi-shard
+        # path does (.replace, not .format) so the {INPUT_URL}/{UPLOAD_URL}
+        # placeholders in the template don't blow up with KeyError.
+        minio_key = profile.split_params.get("minio_key", profile.entry_file)
+        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=4)
+        output_key = f"{job_id}/chunk_0.tar.gz"
+        upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=4)
+
+        cmd = (catalog_entry.entrypoint_template
+               .replace("{INPUT}", profile.entry_file)
+               .replace("{CHUNK_START}", "0").replace("{CHUNK_END}", "0")
+               .replace("{OUTPUT_PATH}", "/output")
+               .replace("{INPUT_URL}", input_url).replace("{UPLOAD_URL}", upload_url))
+
         return [ChunkSpec(
             chunk_index=1, chunk_start=0, chunk_end=0,
-            command=catalog_entry.entrypoint_template.format(INPUT=profile.entry_file, CHUNK_START=0, CHUNK_END=0, OUTPUT_PATH="/output"),
+            command=cmd,
             env_vars={"INPUT": profile.entry_file, "CHUNK_START": "0", "CHUNK_END": "0"},
-            resources=profile.resources, network_mode="none"
+            resources=profile.resources, network_mode="none",
+            requires_public_network=getattr(profile, 'requires_public_network', False),
         )]
 
     num_chunks = min(available_nodes, 8) if available_nodes > 0 else 1
@@ -173,7 +202,7 @@ def split_data(profile: JobProfile, available_nodes: int, catalog_entry, job_id:
     return chunks
 
 
-def split_simulation(profile: JobProfile, available_nodes: int, catalog_entry) -> list[ChunkSpec]:
+def split_simulation(profile: JobProfile, available_nodes: int, catalog_entry, job_id: str) -> list[ChunkSpec]:
     """Domain decomposition for simulation workloads (OpenFOAM, LAMMPS, GROMACS).
 
     For OpenFOAM: maps to decomposePar processor directories.

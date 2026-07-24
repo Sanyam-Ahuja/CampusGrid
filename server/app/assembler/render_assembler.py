@@ -137,7 +137,7 @@ async def process_render_assembly_async(job_id: str):
                 f.read(),
                 content_type=content_type,
             )
-        presigned = minio_service.get_presigned_url(settings.BUCKET_JOB_OUTPUTS, final_key)
+        presigned = minio_service.get_presigned_url(settings.BUCKET_JOB_OUTPUTS, final_key, expiry_hours=168)
 
     # 4. Final Updates
     async with make_celery_session() as session:

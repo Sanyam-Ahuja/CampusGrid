@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "campugrid_dev_secret"
     MINIO_SECURE: bool = False
 
+    # Public-facing S3 endpoint used when SIGNING presigned URLs that are handed
+    # to remote contributor nodes and customer browsers. Internal server↔MinIO
+    # traffic still uses MINIO_ENDPOINT; only the host embedded in presigned URLs
+    # changes. Leave blank to fall back to MINIO_ENDPOINT (single-machine dev).
+    PUBLIC_MINIO_ENDPOINT: str = ""
+    PUBLIC_MINIO_SECURE: bool = True
+
     # === JWT Auth ===
     JWT_SECRET_KEY: str = "dev-secret-key-change-in-production-please"
     JWT_ALGORITHM: str = "HS256"
@@ -32,6 +39,7 @@ class Settings(BaseSettings):
 
     # === Gemini API ===
     GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
 
     # === Sentry ===
     SENTRY_DSN: str = ""

@@ -39,8 +39,11 @@ class JobStatusResponse(BaseModel):
     actual_cost: float
     total_chunks: int
     completed_chunks: int
+    input_path: str | None
+    output_path: str | None
     presigned_url: str | None
     created_at: datetime
+    updated_at: datetime | None
     completed_at: datetime | None
     chunks: list[ChunkResponse] = []
 

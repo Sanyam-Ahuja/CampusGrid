@@ -10,7 +10,7 @@ import { CampuGridAPI } from "@/lib/api";
 import { useJobStream } from "@/lib/ws";
 import { useQuery } from "@tanstack/react-query";
 
-type SubmitState = "idle" | "uploading" | "detecting" | "ready";
+type SubmitState = "idle" | "uploading" | "detecting" | "ready" | "needs_dockerfile" | "failed";
 
 export default function SubmitPage() {
   const { data: session } = useSession();
@@ -20,6 +20,9 @@ export default function SubmitPage() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [jobProfile, setJobProfile] = useState<any>(null);
   const [requiresNetwork, setRequiresNetwork] = useState(false);
+  const [pauseDetail, setPauseDetail] = useState<string>("");
+  const [errorDetail, setErrorDetail] = useState<string>("");
+  const [resolving, setResolving] = useState(false);
 
   const { messages } = useJobStream(jobId, session?.backend_jwt || "");
 
@@ -58,14 +61,37 @@ export default function SubmitPage() {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({ onDrop });
 
   useEffect(() => {
-    if (submitState === "detecting" && messages.length > 0) {
-      const lastMsg = messages[messages.length - 1];
-      if (lastMsg.type === "pipeline_complete" && lastMsg.profile) {
-        setJobProfile(lastMsg.profile);
-        setSubmitState("ready");
-      }
+    if (messages.length === 0) return;
+    const lastMsg = messages[messages.length - 1];
+
+    if (lastMsg.type === "pipeline_complete" && lastMsg.profile) {
+      setJobProfile(lastMsg.profile);
+      setSubmitState("ready");
+    } else if (lastMsg.type === "detection_step" && lastMsg.step === "needs_dockerfile") {
+      // Pipeline paused — the user must supply a Dockerfile or authorize AI generation.
+      setPauseDetail(lastMsg.detail || "Could not auto-detect this workload.");
+      setSubmitState("needs_dockerfile");
+    } else if (lastMsg.type === "detection_step" && lastMsg.step === "failed") {
+      setErrorDetail(lastMsg.detail || "Pipeline failed.");
+      setSubmitState("failed");
     }
-  }, [messages, submitState]);
+  }, [messages]);
+
+  const handleResolve = useCallback(async (opts: { dockerfile?: File; useAi?: boolean }) => {
+    if (!jobId) return;
+    setResolving(true);
+    try {
+      await api.resolveDockerfile(jobId, opts);
+      // Clear consumed messages by re-entering detecting state.
+      setSubmitState("detecting");
+    } catch (e) {
+      console.error(e);
+      setErrorDetail("Failed to submit resolution. Please try again.");
+      setSubmitState("failed");
+    } finally {
+      setResolving(false);
+    }
+  }, [jobId, api]);
 
   const handleLaunch = () => {
     if (jobId) {
@@ -247,6 +273,78 @@ export default function SubmitPage() {
                 </div>
               </motion.div>
             )}
+
+            {submitState === "needs_dockerfile" && (
+              <motion.div
+                key="needs_dockerfile"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-slate-900/30 backdrop-blur-xl border border-yellow-500/30 rounded-xl p-8"
+              >
+                <div className="flex items-center gap-3 mb-4">
+                  <Shield className="text-yellow-400" size={28} />
+                  <h2 className="text-2xl font-bold text-white">Action Needed</h2>
+                </div>
+                <p className="text-slate-300 whitespace-pre-line mb-6">{pauseDetail}</p>
+
+                <div className="space-y-4">
+                  <label className="block">
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">Upload a Dockerfile</span>
+                    <input
+                      type="file"
+                      disabled={resolving}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) handleResolve({ dockerfile: f });
+                      }}
+                      className="mt-2 block w-full text-sm text-slate-400 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-slate-800 file:text-slate-200 hover:file:bg-slate-700"
+                    />
+                  </label>
+
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 h-px bg-slate-800" />
+                    <span className="text-xs text-slate-600 uppercase">or</span>
+                    <div className="flex-1 h-px bg-slate-800" />
+                  </div>
+
+                  <button
+                    disabled={resolving}
+                    onClick={() => handleResolve({ useAi: true })}
+                    className="w-full py-4 bg-emerald-500 text-white rounded-lg font-black hover:bg-emerald-400 transition-colors disabled:opacity-50"
+                  >
+                    {resolving ? "Submitting…" : "🤖 Authorize AI to configure it"}
+                  </button>
+                  <button
+                    disabled={resolving}
+                    onClick={() => setSubmitState("idle")}
+                    className="w-full py-3 bg-slate-800 text-slate-300 rounded-lg font-bold hover:bg-slate-700 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
+            {submitState === "failed" && (
+              <motion.div
+                key="failed"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-slate-900/30 backdrop-blur-xl border border-red-500/30 rounded-xl p-8"
+              >
+                <div className="flex items-center gap-3 mb-4">
+                  <XCircle className="text-red-400" size={28} />
+                  <h2 className="text-2xl font-bold text-white">Job Failed</h2>
+                </div>
+                <p className="text-slate-300 whitespace-pre-line mb-6">{errorDetail}</p>
+                <button
+                  onClick={() => { setSubmitState("idle"); setUploadProgress(0); }}
+                  className="w-full py-4 bg-slate-800 text-slate-300 rounded-lg font-bold hover:bg-slate-700 transition-colors"
+                >
+                  Start Over
+                </button>
+              </motion.div>
+            )}
           </AnimatePresence>
         </div>
 
@@ -258,23 +356,23 @@ export default function SubmitPage() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-slate-400 text-sm">
                   <Cpu size={18} className="text-emerald-400" />
-                  Available GPUs
+                  Online Nodes
                 </div>
-                <span className="text-white font-bold">{clusterStats?.total_nodes || 0}</span>
+                <span className="text-white font-bold">{clusterStats?.active_nodes ?? 0}</span>
               </div>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-slate-400 text-sm">
                   <Zap size={18} className="text-yellow-400" />
-                  Active Jobs
+                  Jobs Today
                 </div>
-                <span className="text-white font-bold">{clusterStats?.active_jobs || 0}</span>
+                <span className="text-white font-bold">{clusterStats?.jobs_completed_today ?? 0}</span>
               </div>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 text-slate-400 text-sm">
                   <HardDrive size={18} className="text-purple-400" />
-                  Queue Size
+                  GPU Hours Today
                 </div>
-                <span className="text-white font-bold">{clusterStats?.queued_jobs || 0}</span>
+                <span className="text-white font-bold">{(clusterStats?.total_gpu_hours_today ?? 0).toFixed?.(1) ?? 0}</span>
               </div>
             </div>
           </div>

@@ -36,3 +36,11 @@
         reverse_proxy localhost:3000
     }
 }
+
+# Public S3 API endpoint — contributor nodes and customer browsers fetch job
+# inputs / push outputs here via presigned URLs. The host MUST match the host
+# configured in PUBLIC_MINIO_ENDPOINT, because SigV4 signs the Host header.
+# Point a DNS record for s3.campusgrid.sahuja.in at this machine.
+s3.campusgrid.sahuja.in {
+    reverse_proxy localhost:9000
+}

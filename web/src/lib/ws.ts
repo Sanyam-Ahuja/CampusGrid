@@ -69,10 +69,18 @@ export function useWebSocket(url: string | null) {
   return { connected, messages, send };
 }
 
+// Base WS origin. In production set NEXT_PUBLIC_WS_URL=wss://campusgrid.sahuja.in
+// (Caddy proxies /api/v1/* — including the WS routes — to the API server).
+const WS_BASE =
+  process.env.NEXT_PUBLIC_WS_URL ||
+  (process.env.NEXT_PUBLIC_API_URL
+    ? process.env.NEXT_PUBLIC_API_URL.replace(/^http/, "ws").replace(/\/api\/v1\/?$/, "")
+    : "ws://localhost:8000");
+
 export function useJobStream(jobId: string | null, token: string | null) {
-  const wsUrl = jobId && token 
-    ? `ws://localhost:8000/api/v1/ws/job/${jobId}?token=${token}` 
+  const wsUrl = jobId && token
+    ? `${WS_BASE}/api/v1/ws/job/${jobId}?token=${token}`
     : null;
-    
+
   return useWebSocket(wsUrl);
 }

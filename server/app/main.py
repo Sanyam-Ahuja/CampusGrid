@@ -71,6 +71,17 @@ async def lifespan(app: FastAPI):
                 if message["type"] == "message":
                     data = json.loads(message["data"])
                     target_node_id = data.get("target_node_id")
+
+                    # Cancellation: tell the node to stop the running container.
+                    if data.get("type") == "job_cancel":
+                        if target_node_id:
+                            await ws_manager.send_to_node(target_node_id, {
+                                "type": "job_cancel",
+                                "job_id": data.get("job_id"),
+                                "chunk_id": data.get("chunk_id"),
+                            })
+                        continue
+
                     if target_node_id:
                         # Build the job_dispatch message the Tauri node expects
                         dispatch_msg = {
@@ -84,10 +95,11 @@ async def lifespan(app: FastAPI):
                             logger.info(f"✅ Dispatched chunk {data.get('chunk_id')} to node {target_node_id}")
                         else:
                             logger.warning(f"⚠️  Node {target_node_id} not connected — chunk {data.get('chunk_id')} undelivered")
-                            # Re-queue the chunk so it gets retried when a node comes online
-                            from app.scheduler.matcher import dispatch_chunk
+                            # Reset the chunk to PENDING and re-dispatch. (dispatch_chunk
+                            # alone ignores ASSIGNED chunks, so the old code never retried.)
+                            from app.scheduler.matcher import requeue_chunk
                             if data.get("chunk_id"):
-                                dispatch_chunk.apply_async(
+                                requeue_chunk.apply_async(
                                     args=[data["chunk_id"]],
                                     countdown=15  # retry in 15s
                                 )

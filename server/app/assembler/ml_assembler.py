@@ -72,9 +72,18 @@ async def process_ml_assembly_async(job_id: str):
         with open(tar_path, "wb") as f:
             f.write(bts)
             
+        # Safe extraction of UNTRUSTED node output: reject absolute paths and any
+        # member that would escape temp_dir (path traversal). Preserve subdirs so
+        # the checkpoints/ lookup below still works.
         with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=temp_dir)
-            
+            base = os.path.realpath(temp_dir)
+            for member in tar.getmembers():
+                target = os.path.realpath(os.path.join(temp_dir, member.name))
+                if not (target == base or target.startswith(base + os.sep)):
+                    logger.warning(f"Skipping unsafe tar member: {member.name}")
+                    continue
+                tar.extract(member, path=temp_dir)
+
         # Find checkpoint files
         import glob
         checkpoint_files = glob.glob(os.path.join(temp_dir, "checkpoints", "*.pt"))
@@ -132,7 +141,7 @@ async def process_ml_assembly_async(job_id: str):
                 content_type="application/octet-stream",
             )
         presigned = minio_service.get_presigned_url(
-            settings.BUCKET_JOB_OUTPUTS, final_model_key
+            settings.BUCKET_JOB_OUTPUTS, final_model_key, expiry_hours=168
         )
 
     # Upload training curve
@@ -145,7 +154,7 @@ async def process_ml_assembly_async(job_id: str):
             content_type="application/json",
         )
     curve_presigned = minio_service.get_presigned_url(
-        settings.BUCKET_JOB_OUTPUTS, curve_key
+        settings.BUCKET_JOB_OUTPUTS, curve_key, expiry_hours=168
     )
 
     # 5. Update job status

@@ -33,6 +33,12 @@ async def check_and_rescue_async():
     redis_svc = RedisService(r)
 
     async with make_celery_session() as session:
+        # Jobs that are cancelled/failed — never rescue their chunks.
+        dead_jobs_res = await session.execute(
+            select(Job.id).where(Job.status.in_([JobStatus.CANCELLED, JobStatus.FAILED]))
+        )
+        dead_job_ids = {str(jid) for (jid,) in dead_jobs_res.all()}
+
         # ── Case 1: chunks assigned to offline nodes ──────────────────────
         active_nodes = await redis_svc.get_active_nodes(JobWatchdog.HEARTBEAT_TIMEOUT)
         active_node_ids = set(n["node_id"] for n in active_nodes)
@@ -43,6 +49,8 @@ async def check_and_rescue_async():
             )
         )
         for chunk, node in result.all():
+            if str(chunk.job_id) in dead_job_ids:
+                continue
             if str(node.id) not in active_node_ids:
                 logger.warning(
                     f"Watchdog: Node {node.id} went offline during Chunk {chunk.id}. Rescuing..."
@@ -66,6 +74,8 @@ async def check_and_rescue_async():
             queued_ids = set(queue_priority) | set(queue_normal)
 
             for chunk in pending_chunks:
+                if str(chunk.job_id) in dead_job_ids:
+                    continue
                 chunk_id_str = str(chunk.id)
                 if chunk_id_str not in queued_ids:
                     logger.warning(
@@ -81,6 +91,8 @@ async def check_and_rescue_async():
             )
         )
         for chunk in failed_result.scalars().all():
+            if str(chunk.job_id) in dead_job_ids:
+                continue
             logger.warning(f"Watchdog: Rescuing FAILED chunk {chunk.id} (retry {chunk.retry_count + 1})")
             chunk.status = ChunkStatus.PENDING
             chunk.node_id = None

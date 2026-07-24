@@ -11,9 +11,14 @@ export const authOptions: NextAuthOptions = {
   callbacks: {
     async signIn({ account, profile }) {
       if (account?.provider === "google" && account.id_token) {
+        // Server-side: prefer an internal URL, fall back to the public API URL.
+        const apiBase =
+          process.env.API_URL ||
+          process.env.NEXT_PUBLIC_API_URL ||
+          "http://localhost:8000/api/v1";
         try {
           // Exchange Google token for our backend JWT
-          const res = await fetch("http://localhost:8000/api/v1/auth/google", {
+          const res = await fetch(`${apiBase}/auth/google`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ google_token: account.id_token }),
@@ -25,11 +30,14 @@ export const authOptions: NextAuthOptions = {
             account.backend_jwt = data.access_token;
             return true;
           }
+          console.error(`Backend auth rejected sign-in: ${res.status}`);
         } catch (e) {
           console.error("Failed to authenticate with backend", e);
         }
+        // Fail closed: without a backend JWT the app can't make any API calls.
+        return false;
       }
-      return true; // Fallback for local testing if backend isn't up
+      return false;
     },
     async jwt({ token, account }) {
       // Persist the backend JWT to the token right after signin

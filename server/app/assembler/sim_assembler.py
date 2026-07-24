@@ -137,7 +137,7 @@ async def _assemble_openfoam(
             content_type="application/gzip",
         )
 
-    presigned = minio_service.get_presigned_url(settings.BUCKET_JOB_OUTPUTS, final_key)
+    presigned = minio_service.get_presigned_url(settings.BUCKET_JOB_OUTPUTS, final_key, expiry_hours=168)
     return final_key, presigned
 
 
@@ -167,7 +167,7 @@ async def _assemble_lammps(
                 settings.BUCKET_JOB_OUTPUTS, final_key, f.read(),
                 content_type="application/octet-stream",
             )
-        presigned = minio_service.get_presigned_url(settings.BUCKET_JOB_OUTPUTS, final_key)
+        presigned = minio_service.get_presigned_url(settings.BUCKET_JOB_OUTPUTS, final_key, expiry_hours=168)
         return final_key, presigned
 
     return await _assemble_generic(job_id, temp_dir, local_files)
@@ -202,7 +202,7 @@ async def _assemble_generic(
             content_type="application/gzip",
         )
 
-    presigned = minio_service.get_presigned_url(settings.BUCKET_JOB_OUTPUTS, final_key)
+    presigned = minio_service.get_presigned_url(settings.BUCKET_JOB_OUTPUTS, final_key, expiry_hours=168)
     return final_key, presigned
 
 

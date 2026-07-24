@@ -1,12 +1,10 @@
 """Tier 2 AI Pipeline - Gemini Dockerfile generation."""
 
-import hashlib
 import json
 import logging
 from dataclasses import dataclass
 
 from google import genai
-from google.genai import types as genai_types
 
 from app.core.config import get_settings
 from app.pipeline.catalog import CatalogEntry
@@ -18,9 +16,9 @@ settings = get_settings()
 class AdaptationResult:
     needs_adaptation: bool
     image: str | None = None
-    dockerfile: str | None = None
-    image_tag: str | None = None
-    cached: bool = False
+    # Shell commands (e.g. "pip install opencv-python wandb") to run inside the
+    # base image at container start. No Kaniko/registry build required.
+    commands: str | None = None
     compatible: bool = True
     conflicts: list[str] | None = None
 
@@ -28,7 +26,7 @@ class AdaptationResult:
 class DockerConfigVerifier:
     def __init__(self):
         self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        self.model_id = "gemini-2.5-flash-preview-04-17"
+        self.model_id = settings.GEMINI_MODEL
 
     async def verify_and_adapt(
         self,
@@ -84,25 +82,19 @@ or
             return AdaptationResult(needs_adaptation=True, compatible=False, conflicts=[str(e)])
 
         if result.get("compatible"):
-            cmds = result.get("commands", "")
+            cmds = (result.get("commands") or "").strip()
 
             # If no actual commands were needed (e.g., they were all stdlib), just use base image
-            if not cmds or cmds.strip() == "":
+            if not cmds:
                 return AdaptationResult(needs_adaptation=False, image=catalog_entry.image)
 
-            dockerfile = f"FROM {catalog_entry.image}\nRUN {cmds}\n"
-            content_hash = hashlib.sha256(dockerfile.encode()).hexdigest()[:16]
-            image_tag = f"campugrid/adapted/{content_hash}"
-
-            # TODO Phase 3: We mock out Kaniko building for local verification
-            # In a real environment we would check cache and trigger Kaniko
-            logger.info(f"[MOCK BUILD] Bypassing Kaniko Builder intentionally. Using mock image tag: {image_tag}")
-
+            # Run the install commands inside the real base image at container
+            # start. No registry, no Kaniko — the image stays pullable.
+            logger.info(f"Adapter resolved extra deps via runtime install: {cmds}")
             return AdaptationResult(
                 needs_adaptation=True,
-                dockerfile=dockerfile,
-                image_tag=image_tag,
-                cached=True # Claiming cached to bypass Kaniko Wait
+                image=catalog_entry.image,
+                commands=cmds,
             )
 
         else:

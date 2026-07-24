@@ -66,32 +66,32 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
 
                     loop {
                         // Terminate heartbeat loop if logged out
+                        let mut available = true;
                         if let Some(state) = heartbeat_app.try_state::<crate::AppState>() {
                             if !state.is_logged_in.load(Ordering::SeqCst) {
                                 break;
                             }
+                            // We are available only if the user hasn't paused contributing
+                            // AND we aren't already running a workload. This stops the
+                            // server from dispatching a second chunk to a busy node.
+                            let active = state.is_active.load(Ordering::SeqCst);
+                            let busy = state.is_busy.load(Ordering::SeqCst);
+                            available = active && !busy;
                         }
 
                         let (gpu_load, temp, vram) = read_gpu_telemetry();
 
-                        // Send heartbeat over the actual WebSocket so the server registers
-                        // this node in its Redis sorted-set and marks it as available.
+                        // Send heartbeat over the actual WebSocket. We send only real
+                        // telemetry; the server fills gpu_vram_gb / ram_gb / bandwidth /
+                        // reliability from the node's registered Postgres specs.
                         let hb = json!({
                             "type": "heartbeat",
                             "node_id": heartbeat_node,
-                            "available": true,
+                            "available": available,
                             "resources": {
                                 "gpu_load": gpu_load,
                                 "temp": temp,
-                                "vram_percent": vram,
-                                // Expose hardware capabilities so the matcher can score us.
-                                // hw_detector.rs auto-detected these; hard-coded defaults here
-                                // are safe because the real Tauri registration flow will have
-                                // already stored the correct values in Postgres.
-                                "gpu_vram_gb": 8,
-                                "ram_gb": 16,
-                                "bandwidth_mbps": 100,
-                                "reliability_score": 0.95
+                                "vram_percent": vram
                             }
                         });
 
@@ -127,12 +127,22 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                     "job_dispatch" | "chunk_dispatch" => {
                                         let _ = app_handle.emit("job_dispatch", json_val.clone());
 
+                                        // Mark this node busy so the heartbeat stops
+                                        // advertising availability while we work.
+                                        if let Some(state) = app_handle.try_state::<crate::AppState>() {
+                                            state.is_busy.store(true, Ordering::SeqCst);
+                                        }
+
                                         let chunk_id = json_val["chunk_id"]
                                             .as_str().unwrap_or("unknown").to_string();
                                         let job_id = json_val["job_id"]
                                             .as_str().unwrap_or("").to_string();
                                         let spec = json_val["spec"].clone();
-                                        let env_vars = json_val["chunk_env"].clone();
+                                        // Env vars live inside the chunk spec (spec.env_vars),
+                                        // which is what the server populates. The old "chunk_env"
+                                        // key never existed on the wire, so RANK/WORLD_SIZE/
+                                        // CHUNK_START were silently dropped.
+                                        let env_vars = spec["env_vars"].clone();
                                         let image_str = spec["image"]
                                             .as_str().unwrap_or("").to_string();
 
@@ -166,6 +176,11 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                                 success = true;
                                             }
 
+                                            // Workload finished — we're free again.
+                                            if let Some(state) = app_h_b.try_state::<crate::AppState>() {
+                                                state.is_busy.store(false, Ordering::SeqCst);
+                                            }
+
                                             // ── Report completion back to the server ──────
                                             let final_status = if success { "completed" } else { "failed" };
                                             let status_msg = json!({
@@ -188,6 +203,17 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                                 let _ = w.send(Message::Text(status_msg.to_string().into())).await;
                                             });
                                         });
+                                    }
+                                    "job_cancel" => {
+                                        let chunk_id = json_val["chunk_id"]
+                                            .as_str().unwrap_or("").to_string();
+                                        if !chunk_id.is_empty() {
+                                            println!("Cancelling chunk {}", chunk_id);
+                                            let _ = crate::docker_manager::cancel_workload(&chunk_id);
+                                        }
+                                        if let Some(state) = app_handle.try_state::<crate::AppState>() {
+                                            state.is_busy.store(false, Ordering::SeqCst);
+                                        }
                                     }
                                     _ => {
                                         println!("Received msg type: {}", msg_type);

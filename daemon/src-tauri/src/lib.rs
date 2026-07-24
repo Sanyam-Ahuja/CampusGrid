@@ -12,6 +12,9 @@ use serde::Serialize;
 pub struct AppState {
     pub is_active: Arc<AtomicBool>,
     pub is_logged_in: Arc<AtomicBool>,
+    // True while a workload container is running on this node. Drives heartbeat
+    // availability so the server doesn't dispatch a second chunk to a busy node.
+    pub is_busy: Arc<AtomicBool>,
 }
 
 /// Check if credentials file exists and has content
@@ -340,8 +343,10 @@ pub fn run() {
             let logged_in = !node_id.is_empty() && !auth_token.is_empty();
 
             app.manage(AppState {
-                is_active: Arc::new(AtomicBool::new(false)),
+                // Contribute by default once logged in; the dashboard toggle pauses it.
+                is_active: Arc::new(AtomicBool::new(true)),
                 is_logged_in: Arc::new(AtomicBool::new(logged_in)),
+                is_busy: Arc::new(AtomicBool::new(false)),
             });
 
             // Start websocket loop only if credentials exist

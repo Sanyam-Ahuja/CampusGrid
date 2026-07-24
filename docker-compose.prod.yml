@@ -1,23 +1,6 @@
 version: "3.9"
 
 services:
-  # --- Reverse Proxy & SSL Auto-Manager ---
-  caddy:
-    image: caddy:2-alpine
-    container_name: campugrid-caddy
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile.prod:/etc/caddy/Caddyfile
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - server
-      - web
-      - minio
-
   # --- Database ---
   postgres:
     image: postgres:16-alpine
@@ -214,5 +197,3 @@ volumes:
   registrydata:
   promdata:
   grafanadata:
-  caddy_data:
-  caddy_config:

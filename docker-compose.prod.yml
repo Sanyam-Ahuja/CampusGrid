@@ -97,7 +97,7 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
       - MINIO_SECURE=false
-      - PUBLIC_MINIO_ENDPOINT=s3.campusgrid.sahuja.in
+      - PUBLIC_MINIO_ENDPOINT=s3-campusgrid.sahuja.in
       - PUBLIC_MINIO_SECURE=true
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
@@ -125,7 +125,7 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
       - MINIO_SECURE=false
-      - PUBLIC_MINIO_ENDPOINT=s3.campusgrid.sahuja.in
+      - PUBLIC_MINIO_ENDPOINT=s3-campusgrid.sahuja.in
       - PUBLIC_MINIO_SECURE=true
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
@@ -150,7 +150,7 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
       - MINIO_SECURE=false
-      - PUBLIC_MINIO_ENDPOINT=s3.campusgrid.sahuja.in
+      - PUBLIC_MINIO_ENDPOINT=s3-campusgrid.sahuja.in
       - PUBLIC_MINIO_SECURE=true
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}

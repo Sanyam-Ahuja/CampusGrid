@@ -37,7 +37,7 @@ campusgrid.sahuja.in {
     }
 }
 
-s3.campusgrid.sahuja.in {
+s3-campusgrid.sahuja.in {
     # Public S3 endpoint for presigned URLs (contributor node file access)
     reverse_proxy minio:9000
 }

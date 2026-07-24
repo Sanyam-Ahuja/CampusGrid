@@ -155,6 +155,12 @@ services:
     restart: always
     ports:
       - "127.0.0.1:3000:3000"
+    environment:
+      - NEXTAUTH_SECRET=${JWT_SECRET_KEY}
+      - NEXTAUTH_URL=https://campusgrid.sahuja.in
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - API_URL=http://server:8000/api/v1
     depends_on:
       - server
 

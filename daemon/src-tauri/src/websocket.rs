@@ -158,19 +158,37 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
 
                                             if !image_str.is_empty() {
                                                 println!("Pulling Docker image: {}", image_str);
-                                                if let Ok(_) = crate::docker_manager::pull_image(&image_str) {
-                                                    println!("Running workload for chunk {}", chunk_id);
-                                                    let net_mode = spec["network_mode"].as_str().unwrap_or("none");
-                                                    if let Ok(c_id) = crate::docker_manager::run_workload(
-                                                        &spec, net_mode, &env_vars, &chunk_id
-                                                    ) {
-                                                        println!("Container {}", c_id);
-                                                        success = crate::docker_manager::stream_logs_and_wait(&c_id, &app_h, &chunk_id)
-                                                            .unwrap_or(false);
-                                                        println!("Done (ok={})", success);
-                                                    }
-                                                }
-                                            } else {
+                                                 match crate::docker_manager::pull_image(&image_str) {
+                                                     Ok(_) => {
+                                                         println!("Running workload for chunk {}", chunk_id);
+                                                         let net_mode = spec["network_mode"].as_str().unwrap_or("none");
+                                                         match crate::docker_manager::run_workload(
+                                                             &spec, net_mode, &env_vars, &chunk_id
+                                                         ) {
+                                                             Ok(c_id) => {
+                                                                 println!("Container {}", c_id);
+                                                                 success = crate::docker_manager::stream_logs_and_wait(&c_id, &app_h, &chunk_id)
+                                                                     .unwrap_or(false);
+                                                                 println!("Done (ok={})", success);
+                                                             }
+                                                             Err(err) => {
+                                                                 eprintln!("Error running workload: {}", err);
+                                                                 let _ = app_h.emit("chunk_log", serde_json::json!({
+                                                                     "chunk_id": chunk_id,
+                                                                     "log": format!("Error running workload: {}", err)
+                                                                 }));
+                                                             }
+                                                         }
+                                                     }
+                                                     Err(err) => {
+                                                         eprintln!("Error pulling image: {}", err);
+                                                         let _ = app_h.emit("chunk_log", serde_json::json!({
+                                                             "chunk_id": chunk_id,
+                                                             "log": format!("Error pulling image: {}", err)
+                                                         }));
+                                                     }
+                                                 }
+                                             } else {
                                                 // No Docker image specified (e.g. render metadata chunk)
                                                 println!("No image for chunk {}, marking complete", chunk_id);
                                                 success = true;

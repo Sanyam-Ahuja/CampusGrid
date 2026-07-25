@@ -124,7 +124,7 @@ def analyze_python(job_id: str, file_keys: list[str]) -> JobProfile:
 
 
 def analyze_zip(job_id: str, file_keys: list[str]) -> JobProfile:
-    """Analyze Python scripts inside a zip file by extracting them in-memory."""
+    """Analyze files inside a zip archive (supports ML/Python and Blender Render)."""
     zip_key = next((k for k in file_keys if k.endswith('.zip')), None)
     if not zip_key:
         zip_key = file_keys[0]
@@ -133,13 +133,35 @@ def analyze_zip(job_id: str, file_keys: list[str]) -> JobProfile:
     zip_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, zip_key)
 
     py_files = {}
+    blend_files = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         for info in z.infolist():
-            if info.filename.endswith('.py') and not info.is_dir():
+            if info.is_dir():
+                continue
+            filename = info.filename.lower()
+            if filename.endswith('.py'):
                 py_files[info.filename] = z.read(info.filename)
+            elif filename.endswith('.blend'):
+                blend_files.append(info.filename)
 
+    # 1. Check for Blender files first
+    if blend_files:
+        blend_files.sort(key=lambda f: f.count('/'))
+        entry_file = blend_files[0]
+        
+        return JobProfile(
+            type="render",
+            framework="blender",
+            gpu_required=True,
+            resources=Resources(vram_gb=4.0, ram_gb=8.0, cpu_cores=4),
+            split_params={"frame_start": 1, "frame_end": 250, "minio_key": zip_key},
+            confidence=0.9,
+            entry_file=entry_file,
+        )
+
+    # 2. Check for Python files
     if not py_files:
-        raise ValueError("No Python files found inside the zip archive")
+        raise ValueError("No valid Python or Blender files found inside the zip archive")
 
     # Find the main entry point
     entry_file = None

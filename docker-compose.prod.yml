@@ -41,6 +41,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-campugrid}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-campugrid_dev_secret}
+      MINIO_BROWSER_REDIRECT_URL: https://campusgrid.sahuja.in/minio
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"

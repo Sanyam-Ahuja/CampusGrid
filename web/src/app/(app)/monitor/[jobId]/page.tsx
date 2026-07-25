@@ -33,7 +33,20 @@ export default function MonitorPage() {
 
   useEffect(() => {
     if (jobInfo?.chunks) {
-      setLiveChunks([...jobInfo.chunks].sort((a, b) => a.chunk_index - b.chunk_index));
+      setLiveChunks(prev => {
+        const sortedInfoChunks = [...jobInfo.chunks].sort((a, b) => a.chunk_index - b.chunk_index);
+        return sortedInfoChunks.map(infoChunk => {
+          const existingChunk = prev.find(c => c.id === infoChunk.id);
+          if (existingChunk) {
+            return {
+              ...infoChunk,
+              progress: existingChunk.progress || infoChunk.progress || 0,
+              telemetry: existingChunk.telemetry || infoChunk.telemetry
+            };
+          }
+          return infoChunk;
+        });
+      });
       setJobStatus(jobInfo.status);
     }
   }, [jobInfo]);

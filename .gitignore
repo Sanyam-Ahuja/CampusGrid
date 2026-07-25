@@ -117,3 +117,4 @@ alembic/__pycache__/
 *.temp
 .hypothesis/
 .env
+logs.md

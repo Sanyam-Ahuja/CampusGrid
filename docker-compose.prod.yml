@@ -172,6 +172,7 @@ services:
     restart: always
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/nodes:/etc/prometheus/nodes
       - promdata:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"

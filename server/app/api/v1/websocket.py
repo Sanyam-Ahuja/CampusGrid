@@ -28,9 +28,10 @@ class ConnectionManager:
         self.node_connections[node_id] = websocket
         logger.info(f"Node {node_id} connected. Total nodes: {len(self.node_connections)}")
 
-    def disconnect_node(self, node_id: str) -> None:
-        self.node_connections.pop(node_id, None)
-        logger.info(f"Node {node_id} disconnected. Total nodes: {len(self.node_connections)}")
+    def disconnect_node(self, node_id: str, websocket: WebSocket) -> None:
+        if self.node_connections.get(node_id) == websocket:
+            self.node_connections.pop(node_id, None)
+            logger.info(f"Node {node_id} disconnected. Total nodes: {len(self.node_connections)}")
 
     async def send_to_node(self, node_id: str, data: dict) -> bool:
         """Send a message to a specific node. Returns success."""
@@ -41,7 +42,7 @@ class ConnectionManager:
                 return True
             except Exception as e:
                 logger.error(f"Failed to send to node {node_id}: {e}")
-                self.disconnect_node(node_id)
+                self.disconnect_node(node_id, ws)
         return False
 
     # ── Customer Connections ────────────────────────────────────
@@ -227,22 +228,24 @@ async def ws_node_connection(
     except Exception as e:
         logger.exception(f"CRASH in node WebSocket {node_id}: {e}")
     finally:
-        ws_manager.disconnect_node(node_id)
-        if 'redis_svc' in locals():
+        is_active = ws_manager.node_connections.get(node_id) == websocket
+        ws_manager.disconnect_node(node_id, websocket)
+        if is_active:
+            if 'redis_svc' in locals():
+                try:
+                    await redis_svc.remove_node(node_id)
+                except:
+                    pass
+            
             try:
-                await redis_svc.remove_node(node_id)
-            except:
-                pass
-        
-        try:
-            from sqlalchemy import update
-            from app.core.database import async_session
-            from app.models.node import Node as NodeModel
-            async with async_session() as db:
-                await db.execute(update(NodeModel).where(NodeModel.id == node_id).values(status="offline"))
-                await db.commit()
-        except Exception as db_err:
-            logger.debug(f"Could not mark node {node_id} offline in pg: {db_err}")
+                from sqlalchemy import update
+                from app.core.database import async_session
+                from app.models.node import Node as NodeModel
+                async with async_session() as db:
+                    await db.execute(update(NodeModel).where(NodeModel.id == node_id).values(status="offline"))
+                    await db.commit()
+            except Exception as db_err:
+                logger.debug(f"Could not mark node {node_id} offline in pg: {db_err}")
             
         if 'redis_client' in locals():
             await redis_client.aclose()

@@ -26,12 +26,40 @@ fn read_gpu_telemetry() -> (i32, i32, i32) {
     (0, 0, 0)
 }
 
+type WsStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type WsWriter = futures_util::stream::SplitSink<WsStream, Message>;
+
 pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, auth_token: String) {
     let base_url = option_env!("CAMPUGRID_WS_URL").unwrap_or("ws://localhost:8000");
     let url = format!("{}/api/v1/ws/node/{}?token={}", base_url, node_id, auth_token);
 
     use tauri::Manager;
     use std::sync::atomic::Ordering;
+
+    // Decoupled channels to route all outgoing WebSocket messages safely.
+    // This allows active tasks to queue messages even during network reconnects.
+    let (tx_out, mut rx_out) = tokio::sync::mpsc::unbounded_channel::<Message>();
+    let tx_out_clone = tx_out.clone();
+
+    // A shared pointer to the currently active connection's writer.
+    let active_writer: Arc<Mutex<Option<Arc<Mutex<WsWriter>>>>> = Arc::new(Mutex::new(None));
+    let active_writer_for_router = active_writer.clone();
+
+    // Spawn a persistent task to forward queued messages to the currently active WebSocket.
+    tokio::spawn(async move {
+        while let Some(msg) = rx_out.recv().await {
+            let opt_w = {
+                let lock = active_writer_for_router.lock().await;
+                lock.clone()
+            };
+            if let Some(w) = opt_w {
+                let mut w_lock = w.lock().await;
+                if let Err(e) = w_lock.send(msg).await {
+                    println!("Error sending message through active WebSocket: {}", e);
+                }
+            }
+        }
+    });
 
     loop {
         // Break this background daemon task if the node logged out
@@ -48,17 +76,18 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                 let _ = app_handle.emit("ws_status", json!({ "status": "connected" }));
 
                 let (write, mut read) = ws_stream.split();
+                let write_shared = Arc::new(Mutex::new(write));
 
-                // Share the write half between the heartbeat task and main loop
-                let write = Arc::new(Mutex::new(write));
+                // Publish this connection's writer as active
+                {
+                    let mut lock = active_writer.lock().await;
+                    *lock = Some(write_shared.clone());
+                }
 
                 // ── Heartbeat task ───────────────────────────────────────────────────
-                // CRITICAL FIX: Actually SEND the heartbeat over the WebSocket.
-                // Previously the message was built but only emitted locally to the Tauri UI.
-                // The server was never notified so it never marked this node as "active".
                 let heartbeat_app = app_handle.clone();
                 let heartbeat_node = node_id.clone();
-                let heartbeat_write = write.clone();
+                let heartbeat_tx = tx_out.clone();
 
                 let heartbeat_handle = tokio::spawn(async move {
                     // Brief delay then send an immediate heartbeat so the server sees us fast
@@ -71,9 +100,6 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                             if !state.is_logged_in.load(Ordering::SeqCst) {
                                 break;
                             }
-                            // We are available only if the user hasn't paused contributing
-                            // AND we aren't already running a workload. This stops the
-                            // server from dispatching a second chunk to a busy node.
                             let active = state.is_active.load(Ordering::SeqCst);
                             let busy = state.is_busy.load(Ordering::SeqCst);
                             available = active && !busy;
@@ -81,9 +107,6 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
 
                         let (gpu_load, temp, vram) = read_gpu_telemetry();
 
-                        // Send heartbeat over the actual WebSocket. We send only real
-                        // telemetry; the server fills gpu_vram_gb / ram_gb / bandwidth /
-                        // reliability from the node's registered Postgres specs.
                         let hb = json!({
                             "type": "heartbeat",
                             "node_id": heartbeat_node,
@@ -95,12 +118,9 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                             }
                         });
 
-                        {
-                            let mut w = heartbeat_write.lock().await;
-                            if let Err(e) = w.send(Message::Text(hb.to_string().into())).await {
-                                println!("Heartbeat send error: {}", e);
-                                break;
-                            }
+                        if let Err(e) = heartbeat_tx.send(Message::Text(hb.to_string().into())) {
+                            println!("Heartbeat send error: {}", e);
+                            break;
                         }
 
                         // Also update the local Tauri UI
@@ -121,14 +141,9 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                             if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&text) {
                                 let msg_type = json_val["type"].as_str().unwrap_or("");
                                 match msg_type {
-                                    // CRITICAL FIX: Server sends "job_dispatch" for all chunks.
-                                    // The old code only handled "chunk_dispatch" so dispatches
-                                    // were silently dropped and jobs stayed stuck at QUEUED.
                                     "job_dispatch" | "chunk_dispatch" => {
                                         let _ = app_handle.emit("job_dispatch", json_val.clone());
 
-                                        // Mark this node busy so the heartbeat stops
-                                        // advertising availability while we work.
                                         if let Some(state) = app_handle.try_state::<crate::AppState>() {
                                             state.is_busy.store(true, Ordering::SeqCst);
                                         }
@@ -138,13 +153,12 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                         let job_id = json_val["job_id"]
                                             .as_str().unwrap_or("").to_string();
                                         let spec = json_val["spec"].clone();
-                                        // Env vars live inside the chunk spec (spec.env_vars),
-                                        // which is what the server populates. The old "chunk_env"
-                                        // key never existed on the wire, so RANK/WORLD_SIZE/
-                                        // CHUNK_START were silently dropped.
                                         let env_vars = spec["env_vars"].clone();
                                         let image_str = spec["image"]
                                             .as_str().unwrap_or("").to_string();
+
+                                        let chunk_start = spec["chunk_start"].as_i64().unwrap_or(0);
+                                        let chunk_end = spec["chunk_end"].as_i64().unwrap_or(0);
 
                                         let node_id_done = node_id.clone();
                                         let app_h = app_handle.clone();
@@ -155,24 +169,57 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                         let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
                                         
                                         // Spawn log streaming WebSocket forwarder
-                                        let write_logs = write.clone();
+                                        let tx_out_logs = tx_out.clone();
                                         let job_id_logs = job_id.clone();
                                         let chunk_id_logs = chunk_id.clone();
                                         rt_handle.spawn(async move {
                                             while let Some(line) = log_rx.recv().await {
+                                                // Parse progress from Blender's stdout (e.g. "Fra:53")
+                                                let mut progress = None;
+                                                if chunk_end > chunk_start {
+                                                    if let Some(fra_idx) = line.find("Fra:") {
+                                                        let sub = &line[fra_idx + 4..];
+                                                        let mut num_str = String::new();
+                                                        for c in sub.chars() {
+                                                            if c.is_ascii_digit() {
+                                                                num_str.push(c);
+                                                            } else {
+                                                                break;
+                                                             }
+                                                         }
+                                                         if let Ok(frame) = num_str.parse::<i64>() {
+                                                             let total = chunk_end - chunk_start + 1;
+                                                             let rendered = (frame - chunk_start).max(0);
+                                                             let pct = (rendered as f64 / total as f64 * 100.0) as i32;
+                                                             progress = Some(pct.min(100));
+                                                         }
+                                                     }
+                                                 }
+
+                                                 // If progress updated, send status update to update the UI progress bar
+                                                 if let Some(pct) = progress {
+                                                     let progress_payload = serde_json::json!({
+                                                         "type": "chunk_status",
+                                                         "job_id": job_id_logs,
+                                                         "chunk_id": chunk_id_logs,
+                                                         "status": "running",
+                                                         "progress": pct
+                                                     });
+                                                     let _ = tx_out_logs.send(Message::Text(progress_payload.to_string().into()));
+                                                 }
+
                                                 let log_payload = serde_json::json!({
                                                     "type": "log",
                                                     "job_id": job_id_logs,
                                                     "chunk_id": chunk_id_logs,
                                                     "log": line
                                                 });
-                                                let mut w = write_logs.lock().await;
-                                                let _ = w.send(Message::Text(log_payload.to_string().into())).await;
+                                                let _ = tx_out_logs.send(Message::Text(log_payload.to_string().into()));
                                             }
                                         });
 
                                         // Spawn telemetry sampling WebSocket forwarder
-                                        let write_telemetry = write.clone();
+                                        let tx_out_telemetry = tx_out.clone();
                                         let job_id_telemetry = job_id.clone();
                                         let chunk_id_telemetry = chunk_id.clone();
                                         let app_handle_telemetry = app_handle.clone();
@@ -200,64 +247,56 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                                         "vram_percent": vram
                                                     }
                                                 });
-                                                {
-                                                    let mut w = write_telemetry.lock().await;
-                                                    if let Err(_) = w.send(Message::Text(telemetry_payload.to_string().into())).await {
-                                                        break;
-                                                    }
-                                                }
+                                                let _ = tx_out_telemetry.send(Message::Text(telemetry_payload.to_string().into()));
                                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                             }
                                         });
 
-                                        let write_done = write.clone();
+                                        let tx_out_done = tx_out.clone();
                                         tokio::task::spawn_blocking(move || {
                                             let mut success = false;
 
                                             if !image_str.is_empty() {
                                                 println!("Pulling Docker image: {}", image_str);
-                                                 match crate::docker_manager::pull_image(&image_str) {
-                                                     Ok(_) => {
-                                                         println!("Running workload for chunk {}", chunk_id);
-                                                         let net_mode = spec["network_mode"].as_str().unwrap_or("none");
-                                                         match crate::docker_manager::run_workload(
-                                                             &spec, net_mode, &env_vars, &chunk_id
-                                                         ) {
-                                                             Ok(c_id) => {
-                                                                 println!("Container {}", c_id);
-                                                                 success = crate::docker_manager::stream_logs_and_wait(&c_id, &app_h, &chunk_id, log_tx)
-                                                                     .unwrap_or(false);
-                                                                 println!("Done (ok={})", success);
-                                                             }
-                                                             Err(err) => {
-                                                                 eprintln!("Error running workload: {}", err);
-                                                                 let _ = app_h.emit("chunk_log", serde_json::json!({
-                                                                     "chunk_id": chunk_id,
-                                                                     "log": format!("Error running workload: {}", err)
-                                                                 }));
-                                                             }
-                                                         }
-                                                     }
-                                                     Err(err) => {
-                                                         eprintln!("Error pulling image: {}", err);
-                                                         let _ = app_h.emit("chunk_log", serde_json::json!({
-                                                             "chunk_id": chunk_id,
-                                                             "log": format!("Error pulling image: {}", err)
-                                                         }));
-                                                     }
-                                                 }
-                                             } else {
-                                                // No Docker image specified (e.g. render metadata chunk)
+                                                match crate::docker_manager::pull_image(&image_str) {
+                                                    Ok(_) => {
+                                                        println!("Running workload for chunk {}", chunk_id);
+                                                        let net_mode = spec["network_mode"].as_str().unwrap_or("none");
+                                                        match crate::docker_manager::run_workload(
+                                                            &spec, net_mode, &env_vars, &chunk_id
+                                                        ) {
+                                                            Ok(c_id) => {
+                                                                println!("Container {}", c_id);
+                                                                success = crate::docker_manager::stream_logs_and_wait(&c_id, &app_h, &chunk_id, log_tx)
+                                                                    .unwrap_or(false);
+                                                                println!("Done (ok={})", success);
+                                                            }
+                                                            Err(err) => {
+                                                                eprintln!("Error running workload: {}", err);
+                                                                let _ = app_h.emit("chunk_log", serde_json::json!({
+                                                                    "chunk_id": chunk_id,
+                                                                    "log": format!("Error running workload: {}", err)
+                                                                }));
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        eprintln!("Error pulling image: {}", err);
+                                                        let _ = app_h.emit("chunk_log", serde_json::json!({
+                                                            "chunk_id": chunk_id,
+                                                            "log": format!("Error pulling image: {}", err)
+                                                        }));
+                                                    }
+                                                }
+                                            } else {
                                                 println!("No image for chunk {}, marking complete", chunk_id);
                                                 success = true;
                                             }
 
-                                            // Workload finished — we're free again.
                                             if let Some(state) = app_h_b.try_state::<crate::AppState>() {
                                                 state.is_busy.store(false, Ordering::SeqCst);
                                             }
 
-                                            // ── Report completion back to the server ──────
                                             let final_status = if success { "completed" } else { "failed" };
                                             let status_msg = json!({
                                                 "type": "chunk_status",
@@ -267,16 +306,13 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                                 "status": final_status
                                             });
 
-                                            // Also update local frontend UI
                                             let _ = app_h_b.emit("job_status_update", json!({
                                                 "chunk_id": chunk_id_b,
                                                 "status": final_status
                                             }));
 
-                                            // Explicitly use the attached runtime handle instead of try_current
                                             rt_handle.spawn(async move {
-                                                let mut w = write_done.lock().await;
-                                                let _ = w.send(Message::Text(status_msg.to_string().into())).await;
+                                                let _ = tx_out_done.send(Message::Text(status_msg.to_string().into()));
                                             });
                                         });
                                     }
@@ -309,6 +345,11 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                     }
                 }
 
+                // Unpublish active connection writer and cleanup
+                {
+                    let mut lock = active_writer.lock().await;
+                    *lock = None;
+                }
                 heartbeat_handle.abort();
             }
             Err(e) => {

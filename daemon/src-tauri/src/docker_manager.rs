@@ -77,7 +77,15 @@ pub fn run_workload(
 
     // Robust GPU Passthrough detection (Docker vs Podman support on Silverblue)
     let gpu_status = crate::gpu_setup::check_gpu_setup();
-    let is_podman_engine = if let Ok(output) = Command::new("docker").arg("--version").output() {
+    let is_podman_engine = if let Ok(host) = std::env::var("DOCKER_HOST") {
+        host.to_lowercase().contains("podman")
+    } else {
+        false
+    } || if let Ok(output) = Command::new("docker").arg("--version").output() {
+        String::from_utf8_lossy(&output.stdout).to_lowercase().contains("podman")
+    } else {
+        false
+    } || if let Ok(output) = Command::new("docker").arg("info").output() {
         String::from_utf8_lossy(&output.stdout).to_lowercase().contains("podman")
     } else {
         false

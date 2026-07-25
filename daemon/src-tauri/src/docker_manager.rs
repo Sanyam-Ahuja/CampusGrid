@@ -189,17 +189,37 @@ pub fn stream_logs_and_wait(
         .arg("-f")
         .arg(container_id)
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to start docker logs: {}", e))?;
 
     if let Some(stdout) = child.stdout.take() {
         let app_handle_clone = app_handle.clone();
         let chunk_clone = chunk_id.to_string();
+        let log_tx_clone = log_tx.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 if let Ok(l) = line {
-                    let _ = log_tx.send(l.clone());
+                    let _ = log_tx_clone.send(l.clone());
+                    let _ = app_handle_clone.emit("chunk_log", serde_json::json!({
+                        "chunk_id": chunk_clone,
+                        "log": l
+                    }));
+                }
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let app_handle_clone = app_handle.clone();
+        let chunk_clone = chunk_id.to_string();
+        let log_tx_clone = log_tx;
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                if let Ok(l) = line {
+                    let _ = log_tx_clone.send(l.clone());
                     let _ = app_handle_clone.emit("chunk_log", serde_json::json!({
                         "chunk_id": chunk_clone,
                         "log": l

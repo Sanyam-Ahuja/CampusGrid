@@ -75,11 +75,34 @@ pub fn run_workload(
     let mut cmd = Command::new("docker");
     cmd.arg("run").arg("-d"); // Run detached (removed --rm so we can fetch logs after completion)
 
-    // Always pass the GPU through if the NVIDIA container runtime is
-    // available and the driver is loaded.
-    if crate::gpu_setup::check_gpu_setup().fully_ready {
-        cmd.arg("--gpus").arg("all");
-        println!("GPU passthrough enabled (--gpus all)");
+    // Robust GPU Passthrough detection (Docker vs Podman support on Silverblue)
+    let gpu_status = crate::gpu_setup::check_gpu_setup();
+    let is_podman_engine = if let Ok(output) = Command::new("docker").arg("--version").output() {
+        String::from_utf8_lossy(&output.stdout).to_lowercase().contains("podman")
+    } else {
+        false
+    };
+
+    if gpu_status.nvidia_gpu_detected || gpu_status.fully_ready {
+        if is_podman_engine {
+            cmd.arg("--device").arg("nvidia.com/gpu=all");
+            println!("Podman GPU passthrough enabled (--device nvidia.com/gpu=all)");
+        } else {
+            cmd.arg("--gpus").arg("all");
+            println!("Docker GPU passthrough enabled (--gpus all)");
+        }
+    } else {
+        // Fallback: If GPU is requested, try to pass it anyway in case nvidia-smi failed inside a sandbox/toolbox environment
+        let spec_gpu = spec["gpu_required"].as_bool().unwrap_or(false);
+        if spec_gpu {
+            if is_podman_engine {
+                cmd.arg("--device").arg("nvidia.com/gpu=all");
+                println!("GPU requested: Attempting Podman GPU passthrough (--device nvidia.com/gpu=all)");
+            } else {
+                cmd.arg("--gpus").arg("all");
+                println!("GPU requested: Attempting Docker GPU passthrough (--gpus all)");
+            }
+        }
     }
 
     // Tier 2 Security Sandboxing (Relaxed for Freedom)

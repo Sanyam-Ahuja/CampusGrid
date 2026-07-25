@@ -153,7 +153,34 @@ async def process_chunk_success_async(chunk_id: str, node_id: str):
             await r.aclose()
             return
 
-        # ── Billing + gamification (idempotent: once per chunk) ──────────────
+        # ── Assembly Chunk Completion Fast Path ──────────────────────────────
+        # When the assembly chunk finishes, the final_render.mp4 is already
+        # uploaded to MinIO by the node.  Mark the job COMPLETED and bail —
+        # no billing, no downstream assembly call needed.
+        if getattr(chunk, "is_assembly", False):
+            if job_for_count and job_for_count.status != JobStatus.COMPLETED:
+                from app.services.minio_service import minio_service
+                final_key = f"{job_id}/final_render.mp4"
+                presigned = minio_service.get_presigned_url(
+                    settings.BUCKET_JOB_OUTPUTS, final_key, expiry_hours=168
+                )
+                job_for_count.presigned_url = presigned
+                job_for_count.output_path = final_key
+                job_for_count.status = JobStatus.COMPLETED
+                logger.info(f"Assembly chunk complete for job {job_id}; final mp4 at {final_key}")
+                await r.publish("job_updates", json.dumps({
+                    "type": "job_complete",
+                    "job_id": str(job_id),
+                    "status": "completed",
+                    "download_url": presigned,
+                    "message": "Render assembled and compiled on contributor node.",
+                }))
+            await session.commit()
+            dispatch_next_chunk.delay()
+            await r.aclose()
+            return
+
+
         if node and job_for_count and chunk.status == ChunkStatus.COMPLETED:
             already_billed = await session.execute(
                 select(func.count(BillingRecord.id)).where(BillingRecord.chunk_id == chunk.id)
@@ -208,8 +235,56 @@ async def process_chunk_success_async(chunk_id: str, node_id: str):
                     from app.assembler.sim_assembler import assemble_simulation
                     assemble_simulation.delay(str(job_id))
                 elif job_type == "render":
-                    from app.assembler.render_assembler import assemble_render
-                    assemble_render.delay(str(job_id))
+                    # ── Node-Side Assembly ──────────────────────────────────────
+                    # Count real render chunks (exclude any previously created assembly chunk)
+                    render_chunks_res = await session.execute(
+                        select(func.count(Chunk.id)).where(
+                            Chunk.job_id == job_id,
+                            Chunk.is_assembly == 0,
+                        )
+                    )
+                    render_chunk_count = render_chunks_res.scalar() or 0
+
+                    if render_chunk_count == 1:
+                        # ── Single-Node Path ────────────────────────────────────
+                        # The container already compiled and uploaded final_render.mp4
+                        # locally. Just point the job at that output and mark done.
+                        from app.services.minio_service import minio_service
+                        final_key = f"{job_id}/final_render.mp4"
+                        presigned = minio_service.get_presigned_url(
+                            settings.BUCKET_JOB_OUTPUTS, final_key, expiry_hours=168
+                        )
+                        job.presigned_url = presigned
+                        job.output_path = final_key
+                        job.status = JobStatus.COMPLETED
+                        logger.info(f"Single-node render {job_id} complete; final mp4 already uploaded by node.")
+                    else:
+                        # ── Multi-Node Path ─────────────────────────────────────
+                        # Schedule a lightweight Assembly Chunk onto the grid.
+                        # A free node will download all chunk tarballs from MinIO,
+                        # compile them with ffmpeg, and upload the final mp4.
+                        from app.pipeline.splitter import build_assembly_chunk_spec
+                        assembly_spec = build_assembly_chunk_spec(str(job_id), render_chunk_count)
+
+                        assembly_chunk = Chunk(
+                            job_id=job_id,
+                            chunk_index=assembly_spec.chunk_index,
+                            status=ChunkStatus.PENDING,
+                            is_assembly=True,
+                            spec={
+                                "image": "alpine:latest",
+                                "gpu_required": False,
+                                "command": assembly_spec.command,
+                                "env_vars": assembly_spec.env_vars,
+                                "network_mode": assembly_spec.network_mode,
+                            },
+                        )
+                        session.add(assembly_chunk)
+                        job.status = JobStatus.ASSEMBLING
+                        logger.info(
+                            f"Multi-node render {job_id} complete; scheduling Assembly Chunk on grid "
+                            f"(downloading {render_chunk_count} chunk tarballs)."
+                        )
                 else:
                     from app.services.minio_service import minio_service
                     # We can directly use the global `settings` defined at the top of the file!
@@ -224,9 +299,29 @@ async def process_chunk_success_async(chunk_id: str, node_id: str):
 
         await session.commit()
 
+        # If we just created a multi-node assembly chunk, push it into the queue
+        # now that it has a valid DB id (requires flush → id available).
+        if remaining == 0:
+            try:
+                # Fetch the assembly chunk we may have just inserted
+                asm_res = await session.execute(
+                    select(Chunk).where(
+                        Chunk.job_id == job_id,
+                        Chunk.is_assembly == True,  # noqa: E712
+                        Chunk.status == ChunkStatus.PENDING,
+                    )
+                )
+                asm = asm_res.scalar_one_or_none()
+                if asm:
+                    await redis_svc.push_chunk(str(asm.id), priority="high")
+                    logger.info(f"Assembly chunk {asm.id} pushed to priority queue for job {job_id}")
+            except Exception as asm_err:
+                logger.warning(f"Failed to queue assembly chunk: {asm_err}")
+
     # A node just freed up — pull the next queued chunk onto it.
     dispatch_next_chunk.delay()
     await r.aclose()
+
 
 
 @celery.task(name="scheduler.chunk_success")

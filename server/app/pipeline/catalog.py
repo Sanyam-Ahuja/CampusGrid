@@ -20,6 +20,73 @@ class CatalogEntry:
     setup_commands: str = ""
 
 
+# ── Assembly Helpers ─────────────────────────────────────────────────────────
+#
+# When a render job runs on a SINGLE node, the container compiles frames to
+# MP4 locally before uploading — zero server-side work.
+#
+# When a job is split across MULTIPLE nodes, a separate lightweight Assembly
+# Chunk is dispatched to any free node via the grid (see splitter.py).
+
+BLENDER_SINGLE_NODE_COMPILE = (
+    # After blender renders the frames to /tmp/frame_*.png, compile to MP4
+    # in-place using ffmpeg inside the container, then upload only the final video.
+    "&& (if command -v ffmpeg >/dev/null 2>&1; then "
+    "     ls /tmp/frame_*.png 2>/dev/null | sort | head -5; "
+    "     ffmpeg -y -framerate 24 -pattern_type glob -i '/tmp/frame_*.png' "
+    "       -c:v libopenh264 -pix_fmt yuv420p -profile:v high "
+    "       /tmp/final_render.mp4 2>&1 && "
+    "     tar -czf /tmp/output.tar.gz /tmp/final_render.mp4; "
+    "   else "
+    "     tar -czf /tmp/output.tar.gz /tmp/frame_*; "  # fallback: raw PNGs
+    "   fi)"
+)
+
+
+def build_assembly_command(chunk_download_urls: list[str], final_upload_url: str) -> str:
+    """
+    Build the shell command for an Assembly Chunk.
+
+    The assembly chunk runs in a lightweight alpine container on any free node.
+    It downloads all render chunk tar.gz files from MinIO, extracts PNGs,
+    compiles them with ffmpeg, and uploads the final MP4 — all on the node.
+    No server-side CPU work required.
+    """
+    lines = [
+        "apk add --no-cache curl tar ffmpeg python3 2>/dev/null || "
+        "  (apt-get update -qq && apt-get install -y curl tar ffmpeg python3 -qq 2>/dev/null) || true",
+        "mkdir -p /tmp/campugrid_frames",
+    ]
+
+    for i, url in enumerate(chunk_download_urls):
+        lines.append(f"curl -sL '{url}' -o /tmp/chunk_{i}.tar.gz 2>&1 | tail -2")
+        lines.append(
+            f"tar -xzf /tmp/chunk_{i}.tar.gz -C /tmp/campugrid_frames 2>/dev/null || true"
+        )
+        lines.append(f"rm -f /tmp/chunk_{i}.tar.gz")
+
+    lines += [
+        # Find all .png files (may be nested) and move them flat into frames dir
+        "find /tmp/campugrid_frames -name '*.png' -exec mv {{}} /tmp/campugrid_frames/ \\; 2>/dev/null || true",
+        "echo 'CampusGrid Assembly: frames collected:'",
+        "ls /tmp/campugrid_frames/*.png 2>/dev/null | wc -l || echo 0",
+        # Compile with ffmpeg
+        "ffmpeg -y -framerate 24 -pattern_type glob -i '/tmp/campugrid_frames/*.png' "
+        "  -c:v libopenh264 -pix_fmt yuv420p -profile:v high /tmp/final_render.mp4 2>&1 "
+        "|| ffmpeg -y -framerate 24 -pattern_type glob -i '/tmp/campugrid_frames/*.png' "
+        "  -c:v libx264 -pix_fmt yuv420p /tmp/final_render.mp4 2>&1 "
+        "|| (tar -czf /tmp/final_render.tar.gz /tmp/campugrid_frames/*.png && "
+        "    mv /tmp/final_render.tar.gz /tmp/final_render.mp4)",  # last-resort
+        # Upload the final output
+        f"curl --upload-file /tmp/final_render.mp4 '{final_upload_url}'",
+        "echo 'CampusGrid Assembly: upload complete!'",
+    ]
+
+    return " && ".join(lines)
+
+
+
+
 # Generic entrypoint for Gemini-generated / custom-Dockerfile Python jobs:
 # pull input, run the detected script, push output. Dependency installs are
 # injected via CatalogEntry.setup_commands.

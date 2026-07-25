@@ -43,18 +43,28 @@ def compute_chunks(profile: JobProfile, available_nodes: int, catalog_entry, req
     return chunks
 
 def split_render(profile: JobProfile, available_nodes: int, catalog_entry, job_id: str) -> list[ChunkSpec]:
-    """Frame-range parallelism for rendering workloads."""
+    """Frame-range parallelism for rendering workloads.
+
+    Single-node path  → compile video locally inside the container (no server work).
+    Multi-node path   → upload raw frame tar.gz per chunk; caller schedules an
+                        Assembly Chunk via build_assembly_chunk_spec() after all
+                        render chunks complete.
+    """
+    from app.pipeline.catalog import BLENDER_SINGLE_NODE_COMPILE
+
     start = int(profile.split_params.get("frame_start", 1))
     end = int(profile.split_params.get("frame_end", 250))
     total_frames = max(1, end - start + 1)
 
     # Simple chunking logic: map exactly to online devices.
     num_chunks = min(available_nodes, total_frames) if available_nodes > 0 else 1
-    
+
     # If no devices are online yet, don't just create 1 massive chunk!
     # Instead, partition it into chunks of 50 frames to be queued up for nodes when they start.
     if available_nodes == 0 and total_frames > 50:
         num_chunks = max(1, total_frames // 50)
+
+    is_single_node = (num_chunks == 1)
 
     frames_per_chunk = total_frames // num_chunks
     chunks = []
@@ -73,12 +83,35 @@ def split_render(profile: JobProfile, available_nodes: int, catalog_entry, job_i
 
         minio_key = profile.split_params.get("minio_key", profile.entry_file)
         input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=4)
-        output_key = f"{job_id}/chunk_{i}.tar.gz"
+
+        if is_single_node:
+            # Single-node: upload the final .mp4 directly
+            output_key = f"{job_id}/final_render.mp4"
+        else:
+            # Multi-node: upload raw frames; a separate assembly chunk will compile
+            output_key = f"{job_id}/chunk_{i}.tar.gz"
+
         upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=4)
 
         cmd = catalog_entry.entrypoint_template.replace("{INPUT}", profile.entry_file)
-        cmd = cmd.replace("{INPUT_URL}", input_url).replace("{UPLOAD_URL}", upload_url)
+        cmd = cmd.replace("{INPUT_URL}", input_url)
         cmd = cmd.replace("{CHUNK_START}", str(chunk_start)).replace("{CHUNK_END}", str(chunk_end))
+
+        if is_single_node:
+            # Replace the trailing tar+curl with: local ffmpeg compile → upload mp4
+            # The template ends with:
+            #   "&& tar -czf /tmp/output.tar.gz /tmp/frame_* && curl -T /tmp/output.tar.gz '{UPLOAD_URL}'"
+            # We swap that last segment for the in-container compile step.
+            cmd = cmd.replace(
+                "&& tar -czf /tmp/output.tar.gz /tmp/frame_* "
+                "&& curl -T /tmp/output.tar.gz '{UPLOAD_URL}'",
+                BLENDER_SINGLE_NODE_COMPILE + f" && curl --upload-file /tmp/final_render.mp4 '{upload_url}'"
+            )
+            # The template may have already had {UPLOAD_URL} replaced before we
+            # get here via the line above; ensure any leftover placeholder is gone.
+            cmd = cmd.replace("{UPLOAD_URL}", upload_url)
+        else:
+            cmd = cmd.replace("{UPLOAD_URL}", upload_url)
 
         chunks.append(ChunkSpec(
             chunk_index=i+1,
@@ -95,6 +128,58 @@ def split_render(profile: JobProfile, available_nodes: int, catalog_entry, job_i
         ))
 
     return chunks
+
+
+def build_assembly_chunk_spec(job_id: str, render_chunk_count: int) -> ChunkSpec:
+    """Create a lightweight Assembly ChunkSpec for multi-node render jobs.
+
+    This spec is dispatched to any available node after all render chunks finish.
+    The node downloads the raw frame tar.gz files from MinIO, runs ffmpeg locally,
+    and uploads the compiled final_render.mp4 — keeping the server CPU idle.
+    """
+    from app.pipeline.catalog import build_assembly_command
+    from app.services.minio_service import minio_service
+    from app.core.config import get_settings
+    from app.pipeline.analyzer import Resources
+
+    settings = get_settings()
+
+    # Download URLs for every render chunk output
+    chunk_download_urls = [
+        minio_service.get_presigned_url(
+            settings.BUCKET_JOB_OUTPUTS,
+            f"{job_id}/chunk_{i}.tar.gz",
+            expiry_hours=6,
+        )
+        for i in range(render_chunk_count)
+    ]
+
+    # Upload URL for the final compiled video
+    final_upload_url = minio_service.get_presigned_upload_url(
+        settings.BUCKET_JOB_OUTPUTS,
+        f"{job_id}/final_render.mp4",
+        expiry_hours=6,
+    )
+
+    assembly_cmd = build_assembly_command(chunk_download_urls, final_upload_url)
+
+    return ChunkSpec(
+        chunk_index=9999,          # Assembly is always the last "chunk"
+        chunk_start=0,
+        chunk_end=0,
+        command=assembly_cmd,
+        env_vars={},
+        resources=Resources(
+            gpu_required=False,     # Assembly is CPU-only
+            vram_gb=0,
+            ram_gb=2,
+            bandwidth_mbps=100,
+        ),
+        network_mode="host",
+        requires_public_network=False,
+    )
+
+
 
 
 def split_ml(profile: JobProfile, available_nodes: int, catalog_entry, job_id: str) -> list[ChunkSpec]:

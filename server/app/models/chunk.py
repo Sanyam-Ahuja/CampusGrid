@@ -37,6 +37,11 @@ class Chunk(Base):
     spec: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     checkpoint_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # True for the final "assembly" task that compiles chunks into the final output.
+    # Assembly chunks run on a node just like render chunks but are scheduled only
+    # after all render chunks complete.
+    is_assembly: Mapped[bool] = mapped_column(Integer, default=0, nullable=False)
+
 
     # Metrics
     gpu_hours: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)

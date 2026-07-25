@@ -30,7 +30,7 @@ class CatalogEntry:
 
 BLENDER_SINGLE_NODE_COMPILE = (
     # Step 1: Try to install ffmpeg into the Blender container (it's debian-based)
-    "&& (apt-get install -y ffmpeg -qq 2>/dev/null || true) "
+    "&& (apt-get update -qq && apt-get install -y ffmpeg -qq 2>/dev/null || true) "
     # Step 2: Compile to MP4. Both success and fallback paths write to /tmp/final_render.mp4
     # so that the final curl upload always finds the file.
     "&& ("

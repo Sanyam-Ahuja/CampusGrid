@@ -30,11 +30,10 @@ async def purge_all():
         await session.execute(text("TRUNCATE chunks CASCADE"))
         await session.execute(text("TRUNCATE jobs CASCADE"))
 
-        # Reset node stats — cast string to the postgres enum type explicitly
+        # Reset node reliability scores without touching the status enum
         await session.execute(
             text(
                 "UPDATE nodes SET "
-                "  status = 'offline'::node_status, "
                 "  reliability_score = 0.8, "
                 "  current_streak = 0, "
                 "  last_contribution_date = NULL"
@@ -43,7 +42,7 @@ async def purge_all():
 
         await session.commit()
         print("  OK  billing_records, chunks, jobs TRUNCATED.")
-        print("  OK  Nodes reset to offline / default reliability.\n")
+        print("  OK  Node stats reset (reliability, streak).\n")
 
     # -- 2. Redis --------------------------------------------------------------
     print("[2/3] Flushing Redis store...")

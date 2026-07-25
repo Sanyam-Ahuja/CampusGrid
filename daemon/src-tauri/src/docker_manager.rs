@@ -178,7 +178,12 @@ pub fn run_workload(
     }
 }
 
-pub fn stream_logs_and_wait(container_id: &str, app_handle: &tauri::AppHandle, chunk_id: &str) -> Result<bool, String> {
+pub fn stream_logs_and_wait(
+    container_id: &str,
+    app_handle: &tauri::AppHandle,
+    chunk_id: &str,
+    log_tx: tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<bool, String> {
     let mut child = Command::new("docker")
         .arg("logs")
         .arg("-f")
@@ -194,6 +199,7 @@ pub fn stream_logs_and_wait(container_id: &str, app_handle: &tauri::AppHandle, c
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 if let Ok(l) = line {
+                    let _ = log_tx.send(l.clone());
                     let _ = app_handle_clone.emit("chunk_log", serde_json::json!({
                         "chunk_id": chunk_clone,
                         "log": l

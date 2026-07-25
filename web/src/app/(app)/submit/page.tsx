@@ -77,6 +77,37 @@ export default function SubmitPage() {
     }
   }, [messages]);
 
+  // Fallback REST API polling to escape "Connecting to pipeline..." if WebSocket fails or misses messages
+  useEffect(() => {
+    if (submitState !== "detecting" || !jobId || !session?.backend_jwt) return;
+
+    let active = true;
+    const interval = setInterval(async () => {
+      try {
+        const job = await api.getJob(jobId);
+        if (!active) return;
+
+        if (job.status === "needs_dockerfile") {
+          setPauseDetail(job.profile?.error_details || "Dockerfile required for this custom workload.");
+          setSubmitState("needs_dockerfile");
+        } else if (job.status === "failed") {
+          setErrorDetail(job.profile?.error_details || "AI Pipeline analysis failed.");
+          setSubmitState("failed");
+        } else if (job.status !== "analyzing") {
+          setJobProfile(job.profile);
+          setSubmitState("ready");
+        }
+      } catch (e) {
+        console.error("Pipeline fallback polling error:", e);
+      }
+    }, 2000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [submitState, jobId, session?.backend_jwt, api]);
+
   const handleResolve = useCallback(async (opts: { dockerfile?: File; useAi?: boolean }) => {
     if (!jobId) return;
     setResolving(true);

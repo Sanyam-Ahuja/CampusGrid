@@ -110,9 +110,10 @@ async def process_render_assembly_async(job_id: str):
             subprocess.run(ffmpeg_cmd, cwd=frames_dir, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             final_key = f"{job_id}/final_render.mp4"
             content_type = "video/mp4"
-        except subprocess.CalledProcessError as e:
-            logger.error(f"ffmpeg failed: {e.stderr.decode()}")
-            # Fallback to ZIP archive of the raw PNG frames if ffmpeg dies unpredictably
+        except Exception as e:
+            err_msg = e.stderr.decode() if isinstance(e, subprocess.CalledProcessError) else str(e)
+            logger.error(f"ffmpeg failed or not found: {err_msg}")
+            # Fallback to ZIP archive of the raw PNG frames if ffmpeg dies or is missing
             final_output_path = os.path.join(temp_dir, "final_render.tar.gz")
             with tarfile.open(final_output_path, "w:gz") as tar:
                 for f in extracted_frames:

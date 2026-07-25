@@ -146,13 +146,71 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                         let image_str = spec["image"]
                                             .as_str().unwrap_or("").to_string();
 
-                                        let write_done = write.clone();
                                         let node_id_done = node_id.clone();
                                         let app_h = app_handle.clone();
                                         let app_h_b = app_h.clone();
                                         let chunk_id_b = chunk_id.clone();
                                         let rt_handle = tokio::runtime::Handle::current();
 
+                                        let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                                        
+                                        // Spawn log streaming WebSocket forwarder
+                                        let write_logs = write.clone();
+                                        let job_id_logs = job_id.clone();
+                                        let chunk_id_logs = chunk_id.clone();
+                                        rt_handle.spawn(async move {
+                                            while let Some(line) = log_rx.recv().await {
+                                                let log_payload = serde_json::json!({
+                                                    "type": "log",
+                                                    "job_id": job_id_logs,
+                                                    "chunk_id": chunk_id_logs,
+                                                    "log": line
+                                                });
+                                                let mut w = write_logs.lock().await;
+                                                let _ = w.send(Message::Text(log_payload.to_string().into())).await;
+                                            }
+                                        });
+
+                                        // Spawn telemetry sampling WebSocket forwarder
+                                        let write_telemetry = write.clone();
+                                        let job_id_telemetry = job_id.clone();
+                                        let chunk_id_telemetry = chunk_id.clone();
+                                        let app_handle_telemetry = app_handle.clone();
+                                        rt_handle.spawn(async move {
+                                            tokio::time::sleep(Duration::from_millis(1000)).await;
+                                            loop {
+                                                let busy = if let Some(state) = app_handle_telemetry.try_state::<crate::AppState>() {
+                                                    state.is_busy.load(Ordering::SeqCst)
+                                                } else {
+                                                    false
+                                                };
+                                                if !busy {
+                                                    break;
+                                                }
+
+                                                let (gpu_load, temp, vram) = read_gpu_telemetry();
+                                                let telemetry_payload = serde_json::json!({
+                                                    "type": "chunk_status",
+                                                    "job_id": job_id_telemetry,
+                                                    "chunk_id": chunk_id_telemetry,
+                                                    "status": "running",
+                                                    "telemetry": {
+                                                        "gpu_load": gpu_load,
+                                                        "temp": temp,
+                                                        "vram_percent": vram
+                                                    }
+                                                });
+                                                {
+                                                    let mut w = write_telemetry.lock().await;
+                                                    if let Err(_) = w.send(Message::Text(telemetry_payload.to_string().into())).await {
+                                                        break;
+                                                    }
+                                                }
+                                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                            }
+                                        });
+
+                                        let write_done = write.clone();
                                         tokio::task::spawn_blocking(move || {
                                             let mut success = false;
 
@@ -167,7 +225,7 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                                          ) {
                                                              Ok(c_id) => {
                                                                  println!("Container {}", c_id);
-                                                                 success = crate::docker_manager::stream_logs_and_wait(&c_id, &app_h, &chunk_id)
+                                                                 success = crate::docker_manager::stream_logs_and_wait(&c_id, &app_h, &chunk_id, log_tx)
                                                                      .unwrap_or(false);
                                                                  println!("Done (ok={})", success);
                                                              }

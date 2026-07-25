@@ -377,6 +377,17 @@ async def process_dispatch_chunk_async(chunk_id: str):
         # dispatch time as the start for duration/gpu-hour accounting.
         if not chunk_info.started_at:
             chunk_info.started_at = now
+
+        if parent_job and parent_job.status == JobStatus.QUEUED:
+            parent_job.status = JobStatus.RUNNING
+            import json as _json
+            job_update_payload = _json.dumps({
+                "type": "job_status_change",
+                "job_id": str(parent_job.id),
+                "status": "running"
+            })
+            await r.publish("job_updates", job_update_payload)
+
         await session.commit()
 
         # CRITICAL FIX: dispatch_to_node() calls ws_manager.send_to_node() which

@@ -214,6 +214,14 @@ async def ws_node_connection(
                     if data.get("job_id"):
                         await ws_manager.broadcast_to_job(data["job_id"], data)
 
+                elif status == "running":
+                    if data.get("job_id"):
+                        await ws_manager.broadcast_to_job(data["job_id"], data)
+
+            elif msg_type == "log":
+                if data.get("job_id"):
+                    await ws_manager.broadcast_to_job(data["job_id"], data)
+
     except WebSocketDisconnect:
         logger.info(f"Node {node_id} disconnected.")
     except Exception as e:
@@ -278,6 +286,32 @@ async def ws_job_monitor(
         return
 
     await ws_manager.connect_customer(job_id, websocket)
+    
+    # Pre-send current state if pipeline analysis already completed (fixes WebSocket connection race condition)
+    try:
+        if _job.status == "needs_dockerfile":
+            await websocket.send_json({
+                "type": "detection_step",
+                "job_id": job_id,
+                "step": "needs_dockerfile",
+                "detail": (_job.profile or {}).get("error_details", "Dockerfile required for this custom workload.")
+            })
+        elif _job.status == "failed":
+            await websocket.send_json({
+                "type": "detection_step",
+                "job_id": job_id,
+                "step": "failed",
+                "detail": (_job.profile or {}).get("error_details", "AI Pipeline analysis failed.")
+            })
+        elif _job.status not in ("analyzing",):
+            await websocket.send_json({
+                "type": "pipeline_complete",
+                "job_id": job_id,
+                "profile": _job.profile
+            })
+    except Exception as pre_send_err:
+        logger.warning(f"Failed to send initial job state to WS client: {pre_send_err}")
+
     try:
         while True:
             # Keep connection alive — customer doesn't send much

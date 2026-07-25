@@ -71,7 +71,8 @@ def split_render(profile: JobProfile, available_nodes: int, catalog_entry, job_i
         from app.core.config import get_settings
         settings = get_settings()
 
-        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, profile.entry_file, expiry_hours=4)
+        minio_key = profile.split_params.get("minio_key", profile.entry_file)
+        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=4)
         output_key = f"{job_id}/chunk_{i}.tar.gz"
         upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=4)
 

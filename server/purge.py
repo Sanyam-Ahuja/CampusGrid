@@ -30,16 +30,17 @@ async def purge_all():
         await session.execute(text("TRUNCATE chunks CASCADE"))
         await session.execute(text("TRUNCATE jobs CASCADE"))
 
-        # Reset node stats but keep node registrations
+        # Reset node stats — cast string to the postgres enum type explicitly
         await session.execute(
             text(
                 "UPDATE nodes SET "
-                "status = 'offline', "
-                "reliability_score = 0.8, "
-                "current_streak = 0, "
-                "last_contribution_date = NULL"
+                "  status = 'offline'::node_status, "
+                "  reliability_score = 0.8, "
+                "  current_streak = 0, "
+                "  last_contribution_date = NULL"
             )
         )
+
         await session.commit()
         print("  OK  billing_records, chunks, jobs TRUNCATED.")
         print("  OK  Nodes reset to offline / default reliability.\n")

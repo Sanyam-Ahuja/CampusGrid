@@ -82,15 +82,21 @@ async def process_pipeline_async(job_id: str, user_id: str):
     try:
         profile = analyze_files(job_id, file_keys, detections)
     except Exception as e:
-        logger.warning(f"Analysis failed for {job_id}: {e}. Prompting for Dockerfile.")
-        async with make_celery_session() as session:
-            result = await session.execute(select(Job).where(Job.id == job_id))
-            job = result.scalar_one_or_none()
-            if job:
-                job.status = JobStatus.NEEDS_DOCKERFILE
-                await session.commit()
-        await send_customer_update(job_id, "needs_dockerfile", "Pipeline paused. Could not auto-detect workload type from uploaded file(s). Please provide a Dockerfile or authorize AI generation.")
-        return
+        logger.info(f"Heuristics analysis failed for {job_id}: {e}. Triggering Gemini workload classifier...")
+        try:
+            from app.pipeline.classifier import GeminiClassifier
+            classifier = GeminiClassifier()
+            profile = await classifier.classify(file_keys)
+        except Exception as classifier_error:
+            logger.error(f"Gemini classifier failed for {job_id}: {classifier_error}. Prompting for Dockerfile.")
+            async with make_celery_session() as session:
+                result = await session.execute(select(Job).where(Job.id == job_id))
+                job = result.scalar_one_or_none()
+                if job:
+                    job.status = JobStatus.NEEDS_DOCKERFILE
+                    await session.commit()
+            await send_customer_update(job_id, "needs_dockerfile", "Pipeline paused. Could not auto-detect workload type from uploaded file(s). Please provide a Dockerfile or authorize AI generation.")
+            return
 
     await send_customer_update(job_id, "analyzing", f"Detected profile: {profile.type} ({profile.framework})")
 

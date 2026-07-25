@@ -29,15 +29,16 @@ class CatalogEntry:
 # Chunk is dispatched to any free node via the grid (see splitter.py).
 
 BLENDER_SINGLE_NODE_COMPILE = (
-    # Step 1: Try to install ffmpeg into the Blender container (it's debian-based)
-    "&& (apt-get update -qq && apt-get install -y ffmpeg -qq 2>/dev/null || true) "
-    # Step 2: Compile to MP4. Both success and fallback paths write to /tmp/final_render.mp4
-    # so that the final curl upload always finds the file.
+    # Step 1: Install imageio-ffmpeg package which has a precompiled static ffmpeg binary
+    "&& (python3 -m pip install imageio-ffmpeg -q 2>/dev/null || true) "
+    # Step 2: Dynamically query and run ffmpeg from imageio-ffmpeg.
+    # We fall back to system ffmpeg if any, then to tar.gz.
     "&& ("
-    "  ffmpeg -y -framerate 24 -pattern_type glob -i '/tmp/frame_*.png' "
-    "    -c:v libopenh264 -pix_fmt yuv420p -profile:v high /tmp/final_render.mp4 2>&1 "
+    "  FFMPEG_BIN=$(python3 -c \"import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())\" 2>/dev/null) "
+    "  && $FFMPEG_BIN -y -framerate 24 -pattern_type glob -i '/tmp/frame_*.png' "
+    "     -c:v libx264 -pix_fmt yuv420p /tmp/final_render.mp4 2>&1 "
     "  || ffmpeg -y -framerate 24 -pattern_type glob -i '/tmp/frame_*.png' "
-    "    -c:v libx264 -pix_fmt yuv420p /tmp/final_render.mp4 2>&1 "
+    "     -c:v libx264 -pix_fmt yuv420p /tmp/final_render.mp4 2>&1 "
     "  || tar -czf /tmp/final_render.mp4 /tmp/frame_*.png"  # fallback: frames tar at same path
     ")"
 )
@@ -127,7 +128,7 @@ CATALOG: dict[tuple, CatalogEntry] = {
             "\" "
             "&& cd /input "
             "&& blender -b --enable-autoexec '{INPUT}' "
-            "--python-expr \"import base64; exec(base64.b64decode(b'aW1wb3J0IGJweQpzY2VuZSA9IGJweS5jb250ZXh0LnNjZW5lCnNjZW5lLnJlbmRlci5lbmdpbmUgPSAnQ1lDTEVTJwpwcmVmcyA9IGJweS5jb250ZXh0LnByZWZlcmVuY2VzLmFkZG9uc1snY3ljbGVzJ10ucHJlZmVyZW5jZXMKY2hvc2VuID0gTm9uZQpmb3IgdCBpbiAoJ0NVREEnLCAnT1BUSVgnLCAnSElQJywgJ09ORUFQSScsICdNRVRBTCcpOgogICAgdHJ5OgogICAgICAgIHByZWZzLmNvbXB1dGVfZGV2aWNlX3R5cGUgPSB0CiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIGNvbnRpbnVlCiAgICB0cnk6CiAgICAgICAgcHJlZnMuZ2V0X2RldmljZXMoKQogICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICBwYXNzCiAgICBncHVzID0gW2QgZm9yIGQgaW4gcHJlZnMuZGV2aWNlcyBpZiBkLnR5cGUgPT0gdF0KICAgIGlmIGdwdXM6CiAgICAgICAgZm9yIGQgaW4gcHJlZnMuZGV2aWNlczoKICAgICAgICAgICAgZC51c2UgPSAoZC50eXBlID09IHQpCiAgICAgICAgY2hvc2VuID0gdAogICAgICAgIGJyZWFrCmlmIGNob3NlbjoKICAgIHNjZW5lLmN5Y2xlcy5kZXZpY2UgPSAnR1BVJwogICAgcHJpbnQoJ0NhbXB1R3JpZDogQ3ljbGVzIEdQVSBlbmFibGVkIHZpYSAnICsgY2hvc2VuKQplbHNlOgogICAgc2NlbmUuY3ljbGVzLmRldmljZSA9ICdDUFUnCiAgICBwcmludCgnQ2FtcHVHcmlkOiBubyBHUFUgY29tcHV0ZSBkZXZpY2UgZm91bmQsIHJlbmRlcmluZyBvbiBDUFUnKQ==').decode('utf-8'))\" "
+            "--python-expr \"import base64; exec(base64.b64decode(b'aW1wb3J0IGJweQpzY2VuZSA9IGJweS5jb250ZXh0LnNjZW5lCnNjZW5lLnJlbmRlci5lbmdpbmUgPSAnQ1lDTEVTJwpwcmVmcyA9IGJweS5jb250ZXh0LnByZWZlcmVuY2VzLmFkZG9uc1snY3ljbGVzJ10ucHJlZmVyZW5jZXMKY2hvc2VuID0gTm9uZQpmb3IgdCBpbiAoJ0NVREEnLCAnT1BUSVgnLCAnSElQJywgJ09ORUFQSScsICdNRVRBTCcpOgogICAgdHJ5OgogICAgICAgIHByZWZzLmNvbXB1dGVfZGV2aWNlX3R5cGUgPSB0CiAgICBleGNlcHQgRXhjZXB0aW9uOgogICAgICAgIGNvbnRpbnVlCiAgICB0cnk6CiAgICAgICAgcHJlZnMuZ2V0X2RldmljZXMoKQogICAgZXhjZXB0IEV4Y2VwdGlvbjoKICAgICAgICBwYXNzCiAgICBncHVzID0gW2QgZm9yIGQgaW4gcHJlZnMuZGV2aWNlcyBpZiBkLnR5cGUgPT0gdF0KICAgIGlmIGdwdXM6CiAgICAgICAgZm9yIGQgaW4gcHJlZnMuZGV2aWNlczoKICAgICAgICAgICAgZC51c2UgPSAoZC50eXBlID09IHQpCiAgICAgICAgY2hvc2VuID0gdAogICAgICAgIGJyZWFrCmlmIGNob3NlbjoKICAgIHNjZW5lLmN5Y2xlcy5kZXZpY2UgPSAnR1BVJwogICAgcHJpbnQoJ0NhbXB1R3JpZDogQ3ljbGVzIEdQVSBlbmFibGVkIHZpYSAnICsgY2hvc2VuKQplbHNlOgogICAgc2NlbmUuY3ljbGVzLmRldmljZSA9ICdDUFUnCiAgICBwcmludCgnQ2FtcHVHcmlkOiBubyBHUFUgY29tcHV0ZSBkZXZpY2UgZm91bmQsIHJlbmRlcmluZyBvbiBDUFUnKQoKc2NlbmUucmVuZGVyLnVzZV9zZXF1ZW5jZXIgPSBGYWxzZQppZiBoYXNhdHRyKHNjZW5lLCAnY29tcG9zaXRpbmdfbm9kZV9ncm91cCcpIGFuZCBzY2VuZS5jb21wb3NpdGluZ19ub2RlX2dyb3VwOgogICAgc2NlbmUucmVuZGVyLnVzZV9jb21wb3NpdGluZyA9IFRydWUKZWxzZToKICAgIHNjZW5lLnJlbmRlci51c2VfY29tcG9zaXRpbmcgPSBGYWxzZQoKdmwgPSBicHkuY29udGV4dC52aWV3X2xheWVyCnZsLnVzZSA9IFRydWUKZm9yIGNvbCBpbiB2bC5sYXllcl9jb2xsZWN0aW9uLmNoaWxkcmVuOgogICAgaWYgJ3JlZmVyZW5jZScgbm90IGluIGNvbC5uYW1lLmxvd2VyKCk6CiAgICAgICAgY29sLmV4Y2x1ZGUgPSBGYWxzZQ==').decode('utf-8'))\" "
             "-F PNG -o /tmp/frame_#### -s {CHUNK_START} -e {CHUNK_END} -a "
             "&& tar -czf /tmp/output.tar.gz /tmp/frame_* "
             "&& curl -T /tmp/output.tar.gz '{UPLOAD_URL}'"

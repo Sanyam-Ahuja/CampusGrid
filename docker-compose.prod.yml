@@ -171,8 +171,8 @@ services:
     container_name: campugrid-prometheus
     restart: always
     volumes:
-      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./infra/prometheus/nodes:/etc/prometheus/nodes
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,z
+      - ./infra/prometheus/nodes:/etc/prometheus/nodes:z
       - promdata:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"

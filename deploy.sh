@@ -21,7 +21,7 @@ if ! command -v docker &> /dev/null; then
 fi
 
 echo "🏗️  Step 1: Building all Docker services (Next.js, FastAPI, etc.)..."
-docker compose -f docker-compose.prod.yml build --no-cache
+docker compose -f docker-compose.prod.yml build
 
 echo "💾  Step 2: Starting Database, Redis, and Object Storage (Infra dependencies)..."
 docker compose -f docker-compose.prod.yml up -d postgres redis minio

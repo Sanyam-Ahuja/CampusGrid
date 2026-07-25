@@ -164,27 +164,28 @@ async def process_pipeline_async(job_id: str, user_id: str):
         cat_entry = lookup(profile)
 
     if not cat_entry:
-        # Check if user has explicitly asked for AI generation or provided a custom dockerfile resolution
-        async with make_celery_session() as session:
-            result = await session.execute(select(Job).where(Job.id == job_id))
-            job = result.scalar_one_or_none()
-            if not job or job.status != JobStatus.ANALYZING:
-                # If they passed this block via the resume endpoint, we can generate AI
-                pass
-            else:
-                job.status = JobStatus.NEEDS_DOCKERFILE
-                await session.commit()
-                await send_customer_update(job_id, "needs_dockerfile", "Pipeline paused. Could not find a catalog match. Please provide a Dockerfile or authorize AI generation.")
-                return
-
-        await send_customer_update(job_id, "catalog", "Authorized: Triggering Tier 3 Gemini Code Generator...")
+        await send_customer_update(job_id, "catalog", "Triggering Gemini AI Container Config Generator...")
         try:
+            import io
+            import zipfile
             from app.pipeline.catalog import GENERIC_PYTHON_ENTRYPOINT
-            generator = DockerfileGenerator()
-            # Fetch script code for context
-            src_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, profile.entry_file)
+            
+            # Fetch script code for context from zip or flat file
+            zip_key = next((k for k in file_keys if k.endswith('.zip')), None)
+            src_bytes = b""
+            if zip_key:
+                zip_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, zip_key)
+                with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+                    try:
+                        src_bytes = z.read(profile.entry_file)
+                    except Exception:
+                        pass
+            else:
+                src_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, profile.entry_file)
+            
             src_str = src_bytes.decode('utf-8', errors='ignore')
-
+            
+            generator = DockerfileGenerator()
             gen_result = await generator.generate(src_str, None, profile)
             cat_entry = CatalogEntry(
                 image=gen_result.base_image,
@@ -197,9 +198,16 @@ async def process_pipeline_async(job_id: str, user_id: str):
             )
             await send_customer_update(job_id, "catalog", f"Generated container config (base {gen_result.base_image}).")
         except Exception as e:
-            await send_customer_update(job_id, "failed", f"Analysis error generating AI payload: {e}")
-            await _mark_job_failed(job_id)
+            logger.error(f"Gemini container generation failed for {job_id}: {e}. Pausing pipeline.")
+            async with make_celery_session() as session:
+                result = await session.execute(select(Job).where(Job.id == job_id))
+                job = result.scalar_one_or_none()
+                if job:
+                    job.status = JobStatus.NEEDS_DOCKERFILE
+                    await session.commit()
+            await send_customer_update(job_id, "needs_dockerfile", f"Pipeline paused. Could not find catalog match and AI generation failed: {e}. Please provide a Dockerfile.")
             return
+
 
     else:
         # Tier 2: Check if unknown imports require adaptation

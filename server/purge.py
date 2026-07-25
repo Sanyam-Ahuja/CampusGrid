@@ -14,7 +14,9 @@ async def purge_all():
     
     print("🧹 [2/2] Flushing Redis Store...")
     try:
-        r = aioredis.Redis.from_url("redis://localhost:6379/0", decode_responses=True)
+        import os
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        r = aioredis.Redis.from_url(redis_url, decode_responses=True)
         await r.flushdb()
         await r.aclose()
         print("  ✅ Redis Flushed.")

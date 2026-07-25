@@ -299,10 +299,18 @@ async def process_pipeline_async(job_id: str, user_id: str):
             job.status = JobStatus.QUEUED
             job.container_image = cat_entry.image
             job.profile = {
+                "type": profile.type,
                 "framework": profile.framework,
                 "gpu": profile.gpu_required,
                 "vram": profile.resources.vram_gb,
-                "split_keys": profile.split_params
+                "confidence": profile.confidence,
+                "entry_file": profile.entry_file,
+                "split_keys": profile.split_params,
+                "resources": {
+                    "cpu_cores": profile.resources.cpu_cores,
+                    "ram_gb": profile.resources.ram_gb,
+                    "vram_gb": profile.resources.vram_gb,
+                }
             }
             job.total_chunks = len(chunks_data)
 

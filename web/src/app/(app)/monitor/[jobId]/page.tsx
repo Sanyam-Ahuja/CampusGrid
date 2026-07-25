@@ -226,7 +226,7 @@ export default function MonitorPage() {
                    <div key={idx} className="flex gap-3">
                       <span className="text-slate-600 shrink-0">[{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}]</span>
                       <span className={log.level === "error" ? "text-red-400" : "text-emerald-400/80"}>
-                        {log.message}
+                        {log.log || log.message}
                       </span>
                    </div>
                  ))

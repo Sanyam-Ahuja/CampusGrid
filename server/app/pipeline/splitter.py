@@ -75,7 +75,8 @@ def split_render(profile: JobProfile, available_nodes: int, catalog_entry, job_i
         output_key = f"{job_id}/chunk_{i}.tar.gz"
         upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=4)
 
-        cmd = catalog_entry.entrypoint_template.replace("{INPUT_URL}", input_url).replace("{UPLOAD_URL}", upload_url)
+        cmd = catalog_entry.entrypoint_template.replace("{INPUT}", profile.entry_file)
+        cmd = cmd.replace("{INPUT_URL}", input_url).replace("{UPLOAD_URL}", upload_url)
         cmd = cmd.replace("{CHUNK_START}", str(chunk_start)).replace("{CHUNK_END}", str(chunk_end))
 
         chunks.append(ChunkSpec(

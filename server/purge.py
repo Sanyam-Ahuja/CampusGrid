@@ -12,8 +12,9 @@ async def purge_all():
 
     # -- 1. PostgreSQL ---------------------------------------------------------
     print("[1/3] Purging PostgreSQL records...")
+
+    # Migration: separate session so a failure here doesn't block the truncates
     async with async_session() as session:
-        # Apply pending schema migrations
         try:
             await session.execute(
                 text(
@@ -21,28 +22,40 @@ async def purge_all():
                     "is_assembly INTEGER NOT NULL DEFAULT 0"
                 )
             )
+            await session.commit()
             print("  OK  Schema: is_assembly column ensured.")
         except Exception as mig_err:
+            await session.rollback()
             print(f"  --  Schema migration skipped: {mig_err}")
 
-        # Truncate in dependency order
-        await session.execute(text("TRUNCATE billing_records CASCADE"))
-        await session.execute(text("TRUNCATE chunks CASCADE"))
-        await session.execute(text("TRUNCATE jobs CASCADE"))
+    # Truncate: separate session
+    async with async_session() as session:
+        try:
+            await session.execute(text("TRUNCATE billing_records CASCADE"))
+            await session.execute(text("TRUNCATE chunks CASCADE"))
+            await session.execute(text("TRUNCATE jobs CASCADE"))
+            await session.commit()
+            print("  OK  billing_records, chunks, jobs TRUNCATED.")
+        except Exception as trunc_err:
+            await session.rollback()
+            print(f"  WARN  Truncate error: {trunc_err}")
 
-        # Reset node reliability scores without touching the status enum
-        await session.execute(
-            text(
-                "UPDATE nodes SET "
-                "  reliability_score = 0.8, "
-                "  current_streak = 0, "
-                "  last_contribution_date = NULL"
+    # Node stats reset: separate session, gracefully skip on enum errors
+    async with async_session() as session:
+        try:
+            await session.execute(
+                text(
+                    "UPDATE nodes SET "
+                    "  reliability_score = 0.8, "
+                    "  current_streak = 0, "
+                    "  last_contribution_date = NULL"
+                )
             )
-        )
-
-        await session.commit()
-        print("  OK  billing_records, chunks, jobs TRUNCATED.")
-        print("  OK  Node stats reset (reliability, streak).\n")
+            await session.commit()
+            print("  OK  Node stats reset (reliability, streak).\n")
+        except Exception as node_err:
+            await session.rollback()
+            print(f"  WARN  Node reset skipped: {node_err}\n")
 
     # -- 2. Redis --------------------------------------------------------------
     print("[2/3] Flushing Redis store...")

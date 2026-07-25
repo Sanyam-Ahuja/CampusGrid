@@ -29,18 +29,19 @@ class CatalogEntry:
 # Chunk is dispatched to any free node via the grid (see splitter.py).
 
 BLENDER_SINGLE_NODE_COMPILE = (
-    # After blender renders the frames to /tmp/frame_*.png, compile to MP4
-    # in-place using ffmpeg inside the container, then upload only the final video.
-    "&& (if command -v ffmpeg >/dev/null 2>&1; then "
-    "     ls /tmp/frame_*.png 2>/dev/null | sort | head -5; "
-    "     ffmpeg -y -framerate 24 -pattern_type glob -i '/tmp/frame_*.png' "
-    "       -c:v libopenh264 -pix_fmt yuv420p -profile:v high "
-    "       /tmp/final_render.mp4 2>&1 && "
-    "     tar -czf /tmp/output.tar.gz /tmp/final_render.mp4; "
-    "   else "
-    "     tar -czf /tmp/output.tar.gz /tmp/frame_*; "  # fallback: raw PNGs
-    "   fi)"
+    # Step 1: Try to install ffmpeg into the Blender container (it's debian-based)
+    "&& (apt-get install -y ffmpeg -qq 2>/dev/null || true) "
+    # Step 2: Compile to MP4. Both success and fallback paths write to /tmp/final_render.mp4
+    # so that the final curl upload always finds the file.
+    "&& ("
+    "  ffmpeg -y -framerate 24 -pattern_type glob -i '/tmp/frame_*.png' "
+    "    -c:v libopenh264 -pix_fmt yuv420p -profile:v high /tmp/final_render.mp4 2>&1 "
+    "  || ffmpeg -y -framerate 24 -pattern_type glob -i '/tmp/frame_*.png' "
+    "    -c:v libx264 -pix_fmt yuv420p /tmp/final_render.mp4 2>&1 "
+    "  || tar -czf /tmp/final_render.mp4 /tmp/frame_*.png"  # fallback: frames tar at same path
+    ")"
 )
+
 
 
 def build_assembly_command(chunk_download_urls: list[str], final_upload_url: str) -> str:

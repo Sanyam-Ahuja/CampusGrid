@@ -39,7 +39,6 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
     // Decoupled channels to route all outgoing WebSocket messages safely.
     // This allows active tasks to queue messages even during network reconnects.
     let (tx_out, mut rx_out) = tokio::sync::mpsc::unbounded_channel::<Message>();
-    let tx_out_clone = tx_out.clone();
 
     // A shared pointer to the currently active connection's writer.
     let active_writer: Arc<Mutex<Option<Arc<Mutex<WsWriter>>>>> = Arc::new(Mutex::new(None));

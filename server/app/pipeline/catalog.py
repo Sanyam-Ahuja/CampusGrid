@@ -98,7 +98,7 @@ GENERIC_PYTHON_ENTRYPOINT = (
     "&& mkdir -p /input "
     "&& (unzip -o /tmp/input_archive -d /input 2>/dev/null || cp /tmp/input_archive /input/{INPUT}) "
     "&& mkdir -p /output/checkpoints "
-    "&& cd /input && python {INPUT} "
+    "&& cd /input && if [ -d \"/input/$(dirname '{INPUT}')\" ]; then cd \"/input/$(dirname '{INPUT}')\"; fi && python $(basename '{INPUT}') "
     "&& tar -czf /tmp/output.tar.gz -C /output . "
     "&& curl -T /tmp/output.tar.gz '{UPLOAD_URL}'"
 )
@@ -146,7 +146,7 @@ CATALOG: dict[tuple, CatalogEntry] = {
             "&& mkdir -p /input "
             "&& (unzip -o /tmp/input_archive -d /input 2>/dev/null || cp /tmp/input_archive /input/{INPUT}) "
             "&& mkdir -p /output/checkpoints "
-            "&& cd /input && python {INPUT} "
+            "&& cd /input && if [ -d \"/input/$(dirname '{INPUT}')\" ]; then cd \"/input/$(dirname '{INPUT}')\"; fi && python $(basename '{INPUT}') "
             "&& tar -czf /tmp/output.tar.gz -C /output . "
             "&& curl -T /tmp/output.tar.gz '{UPLOAD_URL}'"
         ),
@@ -166,7 +166,7 @@ CATALOG: dict[tuple, CatalogEntry] = {
             "&& mkdir -p /input "
             "&& (unzip -o /tmp/input_archive -d /input 2>/dev/null || cp /tmp/input_archive /input/{INPUT}) "
             "&& mkdir -p /output/checkpoints "
-            "&& cd /input && python {INPUT} "
+            "&& cd /input && if [ -d \"/input/$(dirname '{INPUT}')\" ]; then cd \"/input/$(dirname '{INPUT}')\"; fi && python $(basename '{INPUT}') "
             "&& tar -czf /tmp/output.tar.gz -C /output . "
             "&& curl -T /tmp/output.tar.gz '{UPLOAD_URL}'"
         ),
@@ -186,7 +186,7 @@ CATALOG: dict[tuple, CatalogEntry] = {
             "&& mkdir -p /input "
             "&& (unzip -o /tmp/input_archive -d /input 2>/dev/null || cp /tmp/input_archive /input/{INPUT}) "
             "&& mkdir -p /output/checkpoints "
-            "&& cd /input && python {INPUT} "
+            "&& cd /input && if [ -d \"/input/$(dirname '{INPUT}')\" ]; then cd \"/input/$(dirname '{INPUT}')\"; fi && python $(basename '{INPUT}') "
             "&& tar -czf /tmp/output.tar.gz -C /output . "
             "&& curl -T /tmp/output.tar.gz '{UPLOAD_URL}'"
         ),
@@ -207,7 +207,7 @@ CATALOG: dict[tuple, CatalogEntry] = {
             "&& (unzip -o /tmp/input_archive -d /input 2>/dev/null || cp /tmp/input_archive /input/{INPUT}) "
             "&& mkdir -p /output "
             "&& pip install pandas numpy scipy -q "
-            "&& cd /input && python {INPUT} "
+            "&& cd /input && if [ -d \"/input/$(dirname '{INPUT}')\" ]; then cd \"/input/$(dirname '{INPUT}')\"; fi && python $(basename '{INPUT}') "
             "&& tar -czf /tmp/output.tar.gz -C /output . "
             "&& curl -T /tmp/output.tar.gz '{UPLOAD_URL}'"
         ),

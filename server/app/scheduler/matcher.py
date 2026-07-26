@@ -350,24 +350,26 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str):
             logger.warning(f"Ignoring chunk_failed for {chunk_id} from non-assignee node {node_id}")
             chunk = None
         if chunk and chunk.status not in (ChunkStatus.COMPLETED,):
-            if chunk.retry_count >= MAX_CHUNK_RETRIES:
-                # Exhausted retries — now (and only now) the job is a failure.
+            # Increment retry count immediately
+            chunk.retry_count += 1
+
+            # If the chunk has already run once under Gemini fallback (retry_count >= 2),
+            # or if it has reached MAX_CHUNK_RETRIES, we mark it failed and stop.
+            if chunk.retry_count >= 2:
                 chunk.status = ChunkStatus.FAILED
                 job_result = await session.execute(select(Job).where(Job.id == chunk.job_id))
                 job = job_result.scalar_one_or_none()
                 if job and job.status not in (JobStatus.FAILED, JobStatus.CANCELLED):
                     job.status = JobStatus.FAILED
-                logger.error(f"Chunk {chunk_id} exhausted {MAX_CHUNK_RETRIES} retries; failing job {chunk.job_id}")
+                logger.error(f"Chunk {chunk_id} failed under Gemini fallback; failing job {chunk.job_id}")
             else:
-                # Re-queue on another node instead of killing the whole job.
-                chunk.retry_count += 1
+                # First failure (retry_count == 1): Immediately trigger Gemini fallback and requeue!
                 chunk.status = ChunkStatus.PENDING
                 chunk.node_id = None
 
-                # FALLBACK TO TIER 3: If we have failed twice, let's try regenerating using the Gemini pipeline!
-                if chunk.retry_count == 2 and not chunk.is_assembly:
+                if not chunk.is_assembly:
                     try:
-                        logger.info(f"Chunk {chunk_id} failed twice. Running Gemini fallback to regenerate container config...")
+                        logger.info(f"Chunk {chunk_id} failed. Running Gemini fallback to regenerate container config...")
                         job_result = await session.execute(select(Job).where(Job.id == chunk.job_id))
                         job = job_result.scalar_one_or_none()
                         if job and job.profile and job.input_path:
@@ -414,7 +416,7 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str):
                                 from app.pipeline.orchestrator import send_customer_update
                                 await send_customer_update(
                                     str(job.id), "catalog",
-                                    f"Failing pre-verified matches. Falling back to Tier 3: Generating custom container config via Gemini..."
+                                    f"Failing pre-verified match. Falling back to Tier 3: Generating custom container config via Gemini..."
                                 )
 
                                 from app.pipeline.generator import DockerfileGenerator

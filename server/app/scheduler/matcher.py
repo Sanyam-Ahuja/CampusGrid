@@ -373,12 +373,17 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str):
                         if job and job.profile and job.input_path:
                             entry_file = job.profile.get("entry_file", "")
                             if entry_file:
-                                from app.pipeline.analyzer import JobProfile
+                                from app.pipeline.analyzer import JobProfile, Resources
+                                resources = Resources(
+                                    vram_gb=job.profile.get("resources", {}).get("vram_gb", 0.0),
+                                    ram_gb=job.profile.get("resources", {}).get("ram_gb", 2.0),
+                                    cpu_cores=job.profile.get("resources", {}).get("cpu_cores", 2)
+                                )
                                 profile = JobProfile(
                                     type=job.type.value if job.type else "ml_training",
                                     framework=job.profile.get("framework", "python"),
                                     gpu_required=job.profile.get("gpu", False),
-                                    resources=None,
+                                    resources=resources,
                                     confidence=job.profile.get("confidence", 1.0),
                                     entry_file=entry_file,
                                     split_params=job.profile.get("split_keys", {})
@@ -407,7 +412,7 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str):
                                 
                                 from app.pipeline.generator import DockerfileGenerator
                                 generator = DockerfileGenerator()
-                                gen_result = await generator.generate(src_str, requirements_txt, profile, build_files)
+                                gen_result = await generator.generate(src_str, requirements_txt, profile)
                                 
                                 new_spec = dict(chunk.spec) if chunk.spec else {}
                                 new_spec["image"] = gen_result.base_image

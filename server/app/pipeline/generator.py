@@ -1,12 +1,8 @@
 """Tier 3 AI Pipeline - Gemini base-image + dependency resolution.
 
 For unknown codebases we ask Gemini to pick a real, pullable base image and the
-shell commands needed to install dependencies. The commands run inside that base
-image at container start (CatalogEntry.setup_commands), so there is no registry
-or Kaniko build to manage.
-
-For compiled-language workloads (C/C++/CMake, Rust/Cargo, Go), Gemini generates
-a Python wrapper script that performs the build and run steps inside the container.
+shell commands needed to install dependencies. For compiled or complex workloads,
+Gemini generates a Python wrapper script that handles the full build and run steps.
 """
 
 import json
@@ -44,157 +40,85 @@ class DockerfileGenerator:
         build_files: dict[str, str] | None = None,
         error_log: str | None = None,
     ) -> GenerationResult:
-        """Pick a base image + dependency-install commands for an unknown codebase.
-
-        For compiled languages, also generates a Python wrapper script that handles
-        the build and run steps.
-
-        Args:
-            source_code: The entry file source code (first 3000 chars used in prompt).
-            requirements_txt: Optional requirements.txt content.
-            profile: The JobProfile with entry_file, framework, gpu_required, etc.
-            build_files: Optional dict mapping manifest filenames to their contents
-                         (e.g. {"CMakeLists.txt": "...", "Cargo.toml": "..."}).
-            error_log: Optional error log traceback from a failed previous execution.
-        """
+        """Ask Gemini to figure out how to make a container run this codebase."""
         if build_files is None:
             build_files = {}
 
-        # Derive the project subdirectory from the entry_file path.
-        # e.g. entry_file = "llamacpp-test/app/llama.cpp"  ->  project_dir = "/input/llamacpp-test"
-        # e.g. entry_file = "main.py"                      ->  project_dir = "/input"
+        # Derive the project subdirectory (e.g. "llamacpp-test/foo.cpp" -> "/input/llamacpp-test")
         entry_parts = profile.entry_file.replace("\\", "/").split("/")
-        if len(entry_parts) > 1:
-            project_dir = "/input/" + entry_parts[0]
-        else:
-            project_dir = "/input"
+        project_dir = "/input/" + entry_parts[0] if len(entry_parts) > 1 else "/input"
 
-        prompt = f"""You configure containers for a distributed compute platform that runs
-arbitrary, unmodified GitHub repositories submitted by real users. The final command
-executed inside the container is ALWAYS: `python {{entry_file}}` — this is fixed and
-cannot be changed. Your job is to make that constraint work even when the actual
-workload is written in a compiled or non-Python language.
+        manifests = "\n".join(
+            f"--- {name} ---\n{content}"
+            for name, content in build_files.items()
+            if content and content.strip() != "(not found)"
+        ) or "(none found)"
 
-CONTEXT PROVIDED:
+        prompt = f"""You are configuring a Docker container for a distributed compute platform.
+A user has uploaded a code repository and wants it to run on GPU compute nodes.
 
-Detected entry_file (from classifier): {profile.entry_file}
-Framework detected: {profile.framework}
-GPU required: {profile.gpu_required}
-PROJECT DIRECTORY (the directory where the build manifests live and where all build
-commands must be run): {project_dir}
+PLATFORM FACTS (non-negotiable):
+- The zip archive is extracted to /input/ before the container starts.
+- The project itself lives at: {project_dir}
+- /output/ already exists and is where results should be written.
+- The container will execute: python {profile.entry_file}
+  (This is fixed. If the entry file is not Python, write a wrapper script
+   that the platform can call as `python _campugrid_wrapper.py`.)
 
-CRITICAL: ALL subprocess calls in the wrapper_script that invoke make, cmake, cargo,
-go, or any other build tool MUST use cwd="{project_dir}" (NOT "/input"). The zip
-archive is always extracted to /input/ and the project lives in a subdirectory.
+WHAT WE KNOW ABOUT THIS JOB:
+- Detected framework: {profile.framework}
+- GPU required: {profile.gpu_required}
+- Entry file: {profile.entry_file}
 
-Build/dependency manifests found in the repo (empty string if absent):
---- CMakeLists.txt ---
-{build_files.get('CMakeLists.txt', '(not found)')}
---- Cargo.toml ---
-{build_files.get('Cargo.toml', '(not found)')}
---- Makefile ---
-{build_files.get('Makefile', '(not found)')}
---- go.mod ---
-{build_files.get('go.mod', '(not found)')}
---- package.json ---
-{build_files.get('package.json', '(not found)')}
---- requirements.txt ---
+BUILD MANIFESTS FOUND IN THE REPO:
+{manifests}
+
+REQUIREMENTS.TXT:
 {requirements_txt or '(not found)'}
 
-Entry file source (first 3000 chars, may be non-Python — read it to find the
-actual run command: CLI flags, model paths, arguments the repo's own README
-or Makefile would normally pass):
+ENTRY FILE SOURCE (first 3000 chars):
 {source_code[:3000]}
 """
 
         if error_log:
             prompt += f"""
-PREVIOUS CONTAINER RUN FAILURE DETECTED:
-The previous attempt to run this workload failed. Below you will find:
-1. The Python wrapper script that was used in the previous attempt (if any).
-2. The container error log from that attempt.
-
+PREVIOUS ATTEMPT FAILED — here is everything from that attempt:
 <previous_attempt>
 {error_log}
 </previous_attempt>
 
-IMPORTANT: Carefully read the previous wrapper script AND the error log above.
-- If a wrapper script is shown, you MUST fix it (do not write a completely new one from scratch — keep what worked and fix what failed).
-- Check for: wrong working directory (cwd), missing build flags, missing output steps, wrong binary path, missing CLI arguments, etc.
-- If it's a compiler/library error, adjust `base_image` or `setup_commands`.
-- Always output a corrected wrapper_script with needs_wrapper=true for compiled workloads.
+Figure out what went wrong and fix it. You have full freedom.
 """
 
         prompt += f"""
-YOUR TASK — decide ONE of two paths:
+YOUR JOB:
+Choose a Docker base image and setup commands that will make this code run.
+You have complete freedom — choose whatever base image, install whatever you need,
+do whatever it takes. The only constraint is:
 
-PATH A — entry_file is already valid, directly-runnable Python (`python
-{profile.entry_file}` works with no build step). Set needs_wrapper=false,
-wrapper_script=null. This is the common case — do not invent a wrapper you
-don't need.
+  The platform will call: python {profile.entry_file}
+  If that won't work (e.g. it's a C++ binary, Rust project, etc.), set
+  needs_wrapper=true and write a Python 3 wrapper script at _campugrid_wrapper.py
+  that does the build and runs the result. The platform will then call:
+  python _campugrid_wrapper.py
 
-PATH B — entry_file requires a build step (C/C++/CMake, Rust/Cargo, Go, or
-any compiled/non-Python language), OR the real run command needs CLI
-arguments the platform can't inject on its own. Set needs_wrapper=true and
-write a COMPLETE, standalone Python 3 script as wrapper_script that:
-  1. Uses subprocess.run([...], check=True, cwd="{project_dir}") for ALL
-     build and run steps — never os.system, never shell=True. The project
-     files are located at {project_dir}, NOT at /input directly.
-  2. Performs the FULL build pipeline implied by the manifest present
-     (e.g. CMakeLists.txt -> `cmake -B build -DCMAKE_BUILD_TYPE=Release`
-     then `cmake --build build -j$(nproc)`; Cargo.toml -> `cargo build
-     --release`; go.mod -> `go build -o app .`).
-  3. Runs the resulting binary/script with whatever arguments the source
-     or README implies are required (input paths, model paths, flags).
-     Never invent flags you can't justify from the provided context.
-  4. Reads any input data ONLY from /input/ (already populated by the
-     platform) and writes ALL results to /output/ (already exists) —
-     these paths are fixed, do not assume any other location.
-  5. Exits non-zero (let the subprocess exception propagate) on any
-     build or run failure — do not swallow errors, the platform needs
-     the real failure signal.
-  6. Includes no interactive prompts, no `input()`, no assumptions of a
-     TTY.
+In the wrapper script:
+- You can use subprocess, os, shutil — anything you want.
+- The project is at {project_dir}
+- Input data is under /input/, write output to /output/
+- Let errors propagate (don't swallow exceptions)
+- No interactive prompts
 
-RULES THAT APPLY TO BOTH PATHS:
-- base_image MUST be real and pullable. Use
-  "nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04" if GPU is needed AND a
-  build step is required (note: devel, not runtime — compilers need the
-  full toolkit); "nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04" if GPU
-  is needed with no build step; "python:3.11-slim" otherwise.
-- setup_commands is ONE shell string joined with && covering apt/pip/cargo/
-  go toolchain installation only — never include the build or run steps
-  themselves, those belong in wrapper_script (Path B) or are handled by
-  the platform (Path A).
-- Map import names to PyPI names (cv2 -> opencv-python, PIL -> pillow,
-  sklearn -> scikit-learn). For OpenCV also install libgl1 libglib2.0-0.
-
-ADDITIONAL RULES FOR PATH B (needs_wrapper=true):
-- Regardless of base_image, setup_commands MUST install the compiler
-  toolchain required by the detected manifest:
-    * CMakeLists.txt -> apt-get install -y build-essential cmake
-    * Cargo.toml     -> curl https://sh.rustup.rs -sSf | sh -s -- -y
-                        (then source $HOME/.cargo/env in each subsequent
-                        &&-chained command that needs cargo/rustc)
-    * go.mod         -> apt-get install -y golang-go
-    * Makefile       -> apt-get install -y build-essential
-- If multiple manifests exist, install ALL required toolchains.
-- If base_image is a CUDA image, it may lack python3; include
-  apt-get install -y python3 python3-pip && ln -sf /usr/bin/python3 /usr/bin/python
-  before any pip commands.
-- setup_commands must NOT perform the actual build (cmake, cargo build,
-  go build) — only install the toolchain. The wrapper_script does the build.
-
-Output ONLY valid JSON matching this schema exactly, no markdown fences:
+Output ONLY valid JSON, no markdown:
 {{
-  "base_image": "string",
-  "setup_commands": "string",
+  "base_image": "a real, pullable Docker image tag",
+  "setup_commands": "shell commands to run before the entry file, joined with &&",
   "needs_wrapper": false,
   "wrapper_script": null,
-  "reasoning": "one sentence on why you chose this path"
+  "reasoning": "one sentence"
 }}"""
 
-        logger.info(f"Triggering Gemini base-image generation for framework={profile.framework}")
+        logger.info(f"Triggering Gemini container config generation for framework={profile.framework}")
 
         try:
             response = await self.client.aio.models.generate_content(
@@ -219,16 +143,14 @@ Output ONLY valid JSON matching this schema exactly, no markdown fences:
         wrapper_script = result.get("wrapper_script")
         reasoning = result.get("reasoning", "")
 
-        # Validate wrapper script requirement
         if needs_wrapper:
             if not wrapper_script or not wrapper_script.strip():
                 raise ValueError(
-                    "Gemini indicated needs_wrapper=true but provided no wrapper_script. "
-                    "Cannot proceed with broken container configuration."
+                    "Gemini indicated needs_wrapper=true but provided no wrapper_script."
                 )
-            logger.info(f"Gemini generated wrapper script for compiled workload: {reasoning}")
+            logger.info(f"Gemini generated wrapper: {reasoning}")
 
-        logger.info(f"Gemini chose base={base_image} setup={setup_commands!r} needs_wrapper={needs_wrapper}")
+        logger.info(f"Gemini chose base={base_image} needs_wrapper={needs_wrapper} setup={setup_commands!r}")
         return GenerationResult(
             base_image=base_image,
             setup_commands=setup_commands,

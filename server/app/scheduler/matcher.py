@@ -494,14 +494,15 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str, error_log: str
                                         # Download original zip
                                         original_zip_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, job.input_path)
                                         
-                                        # Create new zip with original contents + wrapper
+                                        # Create new zip with original contents + NEW wrapper
+                                        # Skip any existing _campugrid_wrapper.py to prevent duplicate name warning
                                         import io, zipfile
                                         new_zip_buffer = io.BytesIO()
                                         with zipfile.ZipFile(io.BytesIO(original_zip_bytes)) as original_z:
                                             with zipfile.ZipFile(new_zip_buffer, "w", zipfile.ZIP_DEFLATED) as new_z:
                                                 for info in original_z.infolist():
-                                                     if not info.is_dir():
-                                                         new_z.writestr(info, original_z.read(info.filename))
+                                                    if not info.is_dir() and info.filename != wrapper_filename:
+                                                        new_z.writestr(info, original_z.read(info.filename))
                                                 new_z.writestr(wrapper_filename, gen_result.wrapper_script)
                                                 
                                         # Upload repacked zip

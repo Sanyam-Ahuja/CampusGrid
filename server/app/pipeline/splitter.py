@@ -201,20 +201,22 @@ def split_ml(profile: JobProfile, available_nodes: int, catalog_entry, job_id: s
         cmd = cmd.replace("{INPUT_URL}", input_url).replace("{UPLOAD_URL}", upload_url)
 
         # We assign an implicit worker ID via CHUNK_START mapped as rank
+        env_vars = {}
+        if num_chunks > 1:
+            env_vars["WORLD_SIZE"] = str(num_chunks)
+            env_vars["RANK"] = str(i)
+
         chunks.append(ChunkSpec(
             chunk_index=i+1,
             chunk_start=i,
             chunk_end=i,
             command=cmd,
-            env_vars={
-                "WORLD_SIZE": str(num_chunks),
-                "RANK": str(i),
-            },
+            env_vars=env_vars,
             resources=profile.resources,
             # If DDP is requested, we need network. Else local_sgd is basically 'none' but needs periodic sync?
             # Actually local_sgd means we just run individually and merge later via MinIO.
             # We'll stick to 'campugrid_overlay' for standard ML if they need sync
-            network_mode="campugrid_overlay",
+            network_mode="campugrid_overlay" if num_chunks > 1 else "host",
             requires_public_network=getattr(profile, 'requires_public_network', False)
         ))
 

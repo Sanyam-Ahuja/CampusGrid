@@ -178,19 +178,6 @@ async def cancel_job(
 
     await db.flush()
 
-@router.get("/debug_minio/{prefix}")
-async def debug_minio(prefix: str):
-    """Temporary endpoint to list MinIO files under a prefix."""
-    from app.services.minio_service import minio_service
-    from app.core.config import get_settings
-    settings = get_settings()
-    try:
-        keys = minio_service.list_objects(settings.BUCKET_JOB_INPUTS, prefix=prefix)
-        return {"prefix": prefix, "keys": keys}
-    except Exception as e:
-        return {"error": str(e)}
-
-
 @router.post("/{job_id}/resolve_dockerfile", status_code=status.HTTP_200_OK)
 async def resolve_dockerfile(
     job_id: str,

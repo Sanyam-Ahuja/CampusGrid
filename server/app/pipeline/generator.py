@@ -60,6 +60,15 @@ class DockerfileGenerator:
         if build_files is None:
             build_files = {}
 
+        # Derive the project subdirectory from the entry_file path.
+        # e.g. entry_file = "llamacpp-test/app/llama.cpp"  ->  project_dir = "/input/llamacpp-test"
+        # e.g. entry_file = "main.py"                      ->  project_dir = "/input"
+        entry_parts = profile.entry_file.replace("\\", "/").split("/")
+        if len(entry_parts) > 1:
+            project_dir = "/input/" + entry_parts[0]
+        else:
+            project_dir = "/input"
+
         prompt = f"""You configure containers for a distributed compute platform that runs
 arbitrary, unmodified GitHub repositories submitted by real users. The final command
 executed inside the container is ALWAYS: `python {{entry_file}}` — this is fixed and
@@ -71,6 +80,12 @@ CONTEXT PROVIDED:
 Detected entry_file (from classifier): {profile.entry_file}
 Framework detected: {profile.framework}
 GPU required: {profile.gpu_required}
+PROJECT DIRECTORY (the directory where the build manifests live and where all build
+commands must be run): {project_dir}
+
+CRITICAL: ALL subprocess calls in the wrapper_script that invoke make, cmake, cargo,
+go, or any other build tool MUST use cwd="{project_dir}" (NOT "/input"). The zip
+archive is always extracted to /input/ and the project lives in a subdirectory.
 
 Build/dependency manifests found in the repo (empty string if absent):
 --- CMakeLists.txt ---
@@ -95,12 +110,19 @@ or Makefile would normally pass):
         if error_log:
             prompt += f"""
 PREVIOUS CONTAINER RUN FAILURE DETECTED:
-The previous attempt to run this workload failed with the following traceback/error log:
-<error_log>
-{error_log}
-</error_log>
+The previous attempt to run this workload failed. Below you will find:
+1. The Python wrapper script that was used in the previous attempt (if any).
+2. The container error log from that attempt.
 
-IMPORTANT: You must analyze the above error logs carefully (e.g. check for missing compilers, system libraries, package manager errors, requirements.txt path errors, or Python ModuleNotFoundErrors). Adjust your `base_image` selection (e.g. choose a base image with compiler tools pre-installed like build-essential or cmake, or a devel image if it is a CUDA build) or add the necessary installation commands to `setup_commands` to resolve the traceback/error in this retry.
+<previous_attempt>
+{error_log}
+</previous_attempt>
+
+IMPORTANT: Carefully read the previous wrapper script AND the error log above.
+- If a wrapper script is shown, you MUST fix it (do not write a completely new one from scratch — keep what worked and fix what failed).
+- Check for: wrong working directory (cwd), missing build flags, missing output steps, wrong binary path, missing CLI arguments, etc.
+- If it's a compiler/library error, adjust `base_image` or `setup_commands`.
+- Always output a corrected wrapper_script with needs_wrapper=true for compiled workloads.
 """
 
         prompt += f"""
@@ -115,8 +137,9 @@ PATH B — entry_file requires a build step (C/C++/CMake, Rust/Cargo, Go, or
 any compiled/non-Python language), OR the real run command needs CLI
 arguments the platform can't inject on its own. Set needs_wrapper=true and
 write a COMPLETE, standalone Python 3 script as wrapper_script that:
-  1. Uses subprocess.run([...], check=True, cwd="/input") for every build
-     and run step — never os.system, never shell=True.
+  1. Uses subprocess.run([...], check=True, cwd="{project_dir}") for ALL
+     build and run steps — never os.system, never shell=True. The project
+     files are located at {project_dir}, NOT at /input directly.
   2. Performs the FULL build pipeline implied by the manifest present
      (e.g. CMakeLists.txt -> `cmake -B build -DCMAKE_BUILD_TYPE=Release`
      then `cmake --build build -j$(nproc)`; Cargo.toml -> `cargo build

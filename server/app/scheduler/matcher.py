@@ -25,6 +25,10 @@ settings = get_settings()
 # Kept in sync with JobWatchdog.MAX_RETRIES.
 MAX_CHUNK_RETRIES = 3
 
+# Max times we call Gemini to re-generate the wrapper/config on failure.
+# Each attempt feeds the previous error log + wrapper script back to Gemini.
+MAX_GEMINI_RETRIES = 3
+
 
 def score_node(resources: dict, chunk_spec: dict) -> float:
     """Higher score = better match."""
@@ -354,17 +358,17 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str, error_log: str
             # Increment retry count immediately
             chunk.retry_count += 1
 
-            # If the chunk has already run once under Gemini fallback (retry_count >= 2),
-            # or if it has reached MAX_CHUNK_RETRIES, we mark it failed and stop.
-            if chunk.retry_count >= 2:
+            # If chunk has exceeded Gemini retry budget, permanently fail the job.
+            if chunk.retry_count > MAX_GEMINI_RETRIES:
                 chunk.status = ChunkStatus.FAILED
                 job_result = await session.execute(select(Job).where(Job.id == chunk.job_id))
                 job = job_result.scalar_one_or_none()
                 if job and job.status not in (JobStatus.FAILED, JobStatus.CANCELLED):
                     job.status = JobStatus.FAILED
-                logger.error(f"Chunk {chunk_id} failed under Gemini fallback; failing job {chunk.job_id}")
+                logger.error(f"Chunk {chunk_id} exceeded Gemini retry budget ({MAX_GEMINI_RETRIES}); failing job {chunk.job_id}")
             else:
-                # First failure (retry_count == 1): Immediately trigger Gemini fallback and requeue!
+                # Trigger Gemini fallback on every failure (up to MAX_GEMINI_RETRIES times).
+                # Each attempt feeds the current error log + previous wrapper script back to Gemini.
                 chunk.status = ChunkStatus.PENDING
                 chunk.node_id = None
 
@@ -403,9 +407,10 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str, error_log: str
                                     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
                                         if entry_file in z.namelist():
                                             src_bytes = z.read(entry_file)[:8192]
-                                        for name in z.namelist():
-                                            if name.is_dir():
+                                        for info in z.infolist():
+                                            if info.is_dir():
                                                 continue
+                                            name = info.filename
                                             filename = name.split("/")[-1]
                                             filename_lower = filename.lower()
                                             if filename_lower == "requirements.txt":
@@ -434,16 +439,40 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str, error_log: str
                                     
                                 src_str = src_bytes.decode("utf-8", errors="ignore")
                                 
+                                # On subsequent retries (retry_count > 1), read the previously
+                                # generated wrapper script from the zip and feed it back to Gemini
+                                # so it can self-correct based on the error log.
+                                previous_wrapper_script = None
+                                if chunk.retry_count > 1 and job.input_path.endswith(".zip"):
+                                    try:
+                                        import zipfile, io as _io
+                                        prev_zip_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, job.input_path)
+                                        with zipfile.ZipFile(_io.BytesIO(prev_zip_bytes)) as prev_z:
+                                            if "_campugrid_wrapper.py" in prev_z.namelist():
+                                                previous_wrapper_script = prev_z.read("_campugrid_wrapper.py").decode("utf-8", errors="ignore")
+                                    except Exception as wrapper_read_err:
+                                        logger.warning(f"Could not read previous wrapper from zip: {wrapper_read_err}")
+                                
+                                # Build the enriched error log to feed back to Gemini
+                                enriched_error_log = error_log or ""
+                                if previous_wrapper_script:
+                                    enriched_error_log = (
+                                        f"PREVIOUS WRAPPER SCRIPT (attempt {chunk.retry_count - 1}):\n"
+                                        f"```python\n{previous_wrapper_script}\n```\n\n"
+                                        f"CONTAINER ERROR LOG FROM THAT ATTEMPT:\n{enriched_error_log}"
+                                    )
+                                
                                 # Notify the frontend in real-time about the transition
                                 from app.pipeline.orchestrator import send_customer_update
+                                retry_label = f"attempt {chunk.retry_count}/{MAX_GEMINI_RETRIES}"
                                 await send_customer_update(
                                     str(job.id), "catalog",
-                                    f"Failing pre-verified match. Falling back to Tier 3: Generating custom container config via Gemini..."
+                                    f"Container failed ({retry_label}). Re-generating config with Gemini using the error log..."
                                 )
  
                                 from app.pipeline.generator import DockerfileGenerator
                                 generator = DockerfileGenerator()
-                                gen_result = await generator.generate(src_str, requirements_txt, profile, error_log=error_log)
+                                gen_result = await generator.generate(src_str, requirements_txt, profile, build_files=build_files, error_log=enriched_error_log)
                                 
                                 # Update job container image
                                 job.container_image = gen_result.base_image

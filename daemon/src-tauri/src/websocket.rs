@@ -171,6 +171,8 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                         let rt_handle = tokio::runtime::Handle::current();
 
                                         let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                                        let error_logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+                                        let error_logs_logs = error_logs.clone();
                                         
                                         // Spawn log streaming WebSocket forwarder
                                         let tx_out_logs = tx_out.clone();
@@ -210,6 +212,14 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                                          "progress": pct
                                                      });
                                                      let _ = tx_out_logs.send(Message::Text(progress_payload.to_string().into()));
+                                                 }
+
+                                                 // Keep rolling log history (last 100 lines) for error reporting
+                                                 if let Ok(mut logs) = error_logs_logs.lock() {
+                                                     logs.push(line.clone());
+                                                     if logs.len() > 100 {
+                                                         logs.remove(0);
+                                                     }
                                                  }
 
                                                 let log_payload = serde_json::json!({
@@ -256,6 +266,7 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                             }
                                         });
 
+                                        let error_logs_done = error_logs.clone();
                                         let tx_out_done = tx_out.clone();
                                         tokio::task::spawn_blocking(move || {
                                             let mut success = false;
@@ -302,12 +313,24 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
                                             }
 
                                             let final_status = if success { "completed" } else { "failed" };
+                                            
+                                            let error_detail = if !success {
+                                                if let Ok(logs) = error_logs_done.lock() {
+                                                    Some(logs.join("\n"))
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            };
+
                                             let status_msg = json!({
                                                 "type": "chunk_status",
                                                 "chunk_id": chunk_id,
                                                 "job_id": job_id,
                                                 "node_id": node_id_done,
-                                                "status": final_status
+                                                "status": final_status,
+                                                "error": error_detail
                                             });
 
                                             let _ = app_h_b.emit("job_status_update", json!({

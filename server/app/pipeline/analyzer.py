@@ -134,15 +134,37 @@ def analyze_zip(job_id: str, file_keys: list[str]) -> JobProfile:
 
     py_files = {}
     blend_files = []
+    manifest_files = {}
+    cpp_files = []
+    rust_files = []
+    go_files = []
+
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         for info in z.infolist():
             if info.is_dir():
                 continue
-            filename = info.filename.lower()
-            if filename.endswith('.py'):
-                py_files[info.filename] = z.read(info.filename)
-            elif filename.endswith('.blend'):
-                blend_files.append(info.filename)
+            name = info.filename
+            filename_lower = name.split("/")[-1].lower()
+
+            if filename_lower == "cmakelists.txt":
+                manifest_files["CMakeLists.txt"] = name
+            elif filename_lower == "makefile":
+                manifest_files["Makefile"] = name
+            elif filename_lower == "cargo.toml":
+                manifest_files["Cargo.toml"] = name
+            elif filename_lower == "go.mod":
+                manifest_files["go.mod"] = name
+
+            if name.endswith(('.cpp', '.cc', '.c', '.cxx', '.cu', '.h', '.hpp')):
+                cpp_files.append(name)
+            elif name.endswith('.rs'):
+                rust_files.append(name)
+            elif name.endswith('.go'):
+                go_files.append(name)
+            elif filename_lower.endswith('.py'):
+                py_files[name] = z.read(name)
+            elif filename_lower.endswith('.blend'):
+                blend_files.append(name)
 
     # 1. Check for Blender files first
     if blend_files:
@@ -157,6 +179,75 @@ def analyze_zip(job_id: str, file_keys: list[str]) -> JobProfile:
             split_params={"frame_start": 1, "frame_end": 250, "minio_key": zip_key},
             confidence=0.9,
             entry_file=entry_file,
+        )
+
+    # 1.5 Check for Compiled Language Build Manifests (C/C++, Rust, Go)
+    compiled_framework = None
+    compiled_entry_file = None
+
+    if "CMakeLists.txt" in manifest_files:
+        compiled_framework = "cpp"
+        # Find a suitable entry/main source file for context
+        for f in cpp_files:
+            f_lower = f.lower()
+            if "main.cpp" in f_lower or "main.cc" in f_lower or "main.c" in f_lower or "llama.cpp" in f_lower:
+                compiled_entry_file = f
+                break
+        if not compiled_entry_file and cpp_files:
+            compiled_entry_file = cpp_files[0]
+        if not compiled_entry_file:
+            compiled_entry_file = manifest_files["CMakeLists.txt"]
+
+    elif "Makefile" in manifest_files:
+        compiled_framework = "cpp"
+        for f in cpp_files:
+            f_lower = f.lower()
+            if "main.cpp" in f_lower or "main.cc" in f_lower or "main.c" in f_lower or "llama.cpp" in f_lower:
+                compiled_entry_file = f
+                break
+        if not compiled_entry_file and cpp_files:
+            compiled_entry_file = cpp_files[0]
+        if not compiled_entry_file:
+            compiled_entry_file = manifest_files["Makefile"]
+
+    elif "Cargo.toml" in manifest_files:
+        compiled_framework = "rust"
+        for f in rust_files:
+            if f.endswith("main.rs"):
+                compiled_entry_file = f
+                break
+        if not compiled_entry_file and rust_files:
+            compiled_entry_file = rust_files[0]
+        if not compiled_entry_file:
+            compiled_entry_file = manifest_files["Cargo.toml"]
+
+    elif "go.mod" in manifest_files:
+        compiled_framework = "go"
+        for f in go_files:
+            if f.endswith("main.go"):
+                compiled_entry_file = f
+                break
+        if not compiled_entry_file and go_files:
+            compiled_entry_file = go_files[0]
+        if not compiled_entry_file:
+            compiled_entry_file = manifest_files["go.mod"]
+
+    if compiled_framework:
+        gpu_required = False
+        # Heuristically check if CUDA/GPU is mentioned in filenames or files inside the zip
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+            for info in z.infolist():
+                if "cuda" in info.filename.lower() or info.filename.endswith(".cu"):
+                    gpu_required = True
+                    break
+        return JobProfile(
+            type="data",
+            framework=compiled_framework,
+            gpu_required=gpu_required,
+            resources=Resources(vram_gb=8.0 if gpu_required else 0.0, ram_gb=16.0, cpu_cores=8),
+            split_params={"minio_key": zip_key},
+            confidence=0.9,
+            entry_file=compiled_entry_file,
         )
 
     # 2. Check for Python files

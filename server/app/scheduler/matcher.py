@@ -403,10 +403,31 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str, error_log: str
                                         if entry_file in z.namelist():
                                             src_bytes = z.read(entry_file)[:8192]
                                         for name in z.namelist():
-                                            if name.lower() == "requirements.txt":
+                                            if name.is_dir():
+                                                continue
+                                            filename = name.split("/")[-1]
+                                            filename_lower = filename.lower()
+                                            if filename_lower == "requirements.txt":
                                                 requirements_txt = z.read(name).decode("utf-8", errors="ignore")[:4096]
-                                            elif name.split("/")[-1] in ("cargo.toml", "package.json", "go.mod", "pom.xml", "build.gradle"):
-                                                build_files[name.split("/")[-1]] = z.read(name).decode("utf-8", errors="ignore")[:4096]
+                                            else:
+                                                std_name = None
+                                                if filename_lower == "cmakelists.txt":
+                                                    std_name = "CMakeLists.txt"
+                                                elif filename_lower == "cargo.toml":
+                                                    std_name = "Cargo.toml"
+                                                elif filename_lower == "makefile":
+                                                    std_name = "Makefile"
+                                                elif filename_lower == "go.mod":
+                                                    std_name = "go.mod"
+                                                elif filename_lower == "package.json":
+                                                    std_name = "package.json"
+                                                elif filename_lower == "pom.xml":
+                                                    std_name = "pom.xml"
+                                                elif filename_lower == "build.gradle":
+                                                    std_name = "build.gradle"
+                                                    
+                                                if std_name:
+                                                    build_files[std_name] = z.read(name).decode("utf-8", errors="ignore")[:4096]
                                 else:
                                     src_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, job.input_path)[:8192]
                                     
@@ -418,7 +439,7 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str, error_log: str
                                     str(job.id), "catalog",
                                     f"Failing pre-verified match. Falling back to Tier 3: Generating custom container config via Gemini..."
                                 )
-
+ 
                                 from app.pipeline.generator import DockerfileGenerator
                                 generator = DockerfileGenerator()
                                 gen_result = await generator.generate(src_str, requirements_txt, profile, error_log=error_log)
@@ -426,58 +447,112 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str, error_log: str
                                 # Update job container image
                                 job.container_image = gen_result.base_image
                                 
+                                # Handle wrapper script for compiled workloads in fallback
+                                final_entry_file = entry_file
+                                final_input_path = job.input_path
+                                
+                                if gen_result.needs_wrapper and gen_result.wrapper_script:
+                                    wrapper_filename = "_campugrid_wrapper.py"
+                                    final_entry_file = wrapper_filename
+                                    
+                                    if job.input_path.endswith(".zip"):
+                                        await send_customer_update(
+                                            str(job.id), "catalog",
+                                            f"Generated Python wrapper for compiled workload: {gen_result.reasoning}"
+                                        )
+                                        
+                                        # Download original zip
+                                        original_zip_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, job.input_path)
+                                        
+                                        # Create new zip with original contents + wrapper
+                                        import io, zipfile
+                                        new_zip_buffer = io.BytesIO()
+                                        with zipfile.ZipFile(io.BytesIO(original_zip_bytes)) as original_z:
+                                            with zipfile.ZipFile(new_zip_buffer, "w", zipfile.ZIP_DEFLATED) as new_z:
+                                                for info in original_z.infolist():
+                                                     if not info.is_dir():
+                                                         new_z.writestr(info, original_z.read(info.filename))
+                                                new_z.writestr(wrapper_filename, gen_result.wrapper_script)
+                                                
+                                        # Upload repacked zip
+                                        new_zip_key = f"{job.id}/_campugrid_repacked.zip"
+                                        new_zip_buffer.seek(0)
+                                        minio_service.upload_bytes(
+                                            settings.BUCKET_JOB_INPUTS,
+                                            new_zip_key,
+                                            new_zip_buffer.read(),
+                                            "application/zip"
+                                        )
+                                        
+                                        final_input_path = new_zip_key
+                                        job.input_path = new_zip_key
+                                    else:
+                                        # Flat file upload - upload wrapper directly
+                                        await send_customer_update(
+                                            str(job.id), "catalog",
+                                            f"Generated Python wrapper for compiled workload: {gen_result.reasoning}"
+                                        )
+                                        
+                                        wrapper_key = f"{job.id}/{wrapper_filename}"
+                                        minio_service.upload_bytes(
+                                            settings.BUCKET_JOB_INPUTS,
+                                            wrapper_key,
+                                            gen_result.wrapper_script.encode('utf-8'),
+                                            "text/x-python"
+                                        )
+                                        
+                                        final_input_path = wrapper_key
+                                        job.input_path = wrapper_key
+                                        
                                 # Fetch all chunks for this job to update all of them consistently
                                 all_chunks_res = await session.execute(select(Chunk).where(Chunk.job_id == job.id))
                                 all_chunks = all_chunks_res.scalars().all()
                                 
+                                # Get the new presigned URL if the input path was updated
+                                new_input_url = minio_service.get_presigned_url(
+                                    settings.BUCKET_JOB_INPUTS, final_input_path, expiry_hours=168
+                                )
+                                
                                 for ch in all_chunks:
-                                    if ch.is_assembly:
-                                        continue
-                                    
-                                    new_spec = dict(ch.spec) if ch.spec else {}
-                                    new_spec["image"] = gen_result.base_image
-                                    
-                                    old_command = new_spec.get("command", "")
-                                    if old_command:
-                                        # Extract presigned URLs
-                                        input_url = ""
-                                        idx = old_command.find("-sL '")
-                                        if idx != -1:
-                                            end_idx = old_command.find("'", idx + 5)
-                                            if end_idx != -1:
-                                                input_url = old_command[idx + 5:end_idx]
-                                                
-                                        upload_url = ""
-                                        idx_upload = old_command.find("-T /tmp/output.tar.gz '")
-                                        offset = len("-T /tmp/output.tar.gz '")
-                                        if idx_upload == -1:
-                                            idx_upload = old_command.find("--upload-file /tmp/final_render.mp4 '")
-                                            offset = len("--upload-file /tmp/final_render.mp4 '")
-                                        if idx_upload == -1:
-                                            idx_upload = old_command.find("-T ")
-                                            if idx_upload != -1:
-                                                quote_idx = old_command.find("'", idx_upload)
-                                                if quote_idx != -1:
-                                                    idx_upload = quote_idx
-                                                    offset = 1
-                                        if idx_upload != -1:
-                                            end_idx = old_command.find("'", idx_upload + offset)
-                                            if end_idx != -1:
-                                                upload_url = old_command[idx_upload + offset:end_idx]
-                                                
-                                        if input_url and upload_url:
-                                            from app.pipeline.catalog import GENERIC_PYTHON_ENTRYPOINT
-                                            cmd = GENERIC_PYTHON_ENTRYPOINT.replace("{INPUT}", entry_file)
-                                            cmd = cmd.replace("{INPUT_URL}", input_url)
-                                            cmd = cmd.replace("{UPLOAD_URL}", upload_url)
-                                            
-                                            setup = gen_result.setup_commands.strip()
-                                            if setup:
-                                                cmd = f"{setup} && {cmd}"
-                                            
-                                            new_spec["command"] = cmd
-                                            
-                                    ch.spec = new_spec
+                                     if ch.is_assembly:
+                                         continue
+                                     
+                                     new_spec = dict(ch.spec) if ch.spec else {}
+                                     new_spec["image"] = gen_result.base_image
+                                     
+                                     old_command = new_spec.get("command", "")
+                                     if old_command:
+                                         # Extract upload URL
+                                         upload_url = ""
+                                         idx_upload = old_command.find("-T /tmp/output.tar.gz '")
+                                         offset = len("-T /tmp/output.tar.gz '")
+                                         if idx_upload == -1:
+                                             idx_upload = old_command.find("--upload-file /tmp/final_render.mp4 '")
+                                             offset = len("--upload-file /tmp/final_render.mp4 '")
+                                         if idx_upload == -1:
+                                             idx_upload = old_command.find("-T ")
+                                             if idx_upload != -1:
+                                                 quote_idx = old_command.find("'", idx_upload)
+                                                 if quote_idx != -1:
+                                                     idx_upload = quote_idx
+                                                     offset = 1
+                                         if idx_upload != -1:
+                                             end_idx = old_command.find("'", idx_upload + offset)
+                                             if end_idx != -1:
+                                                 upload_url = old_command[idx_upload + offset:end_idx]
+                                                 
+                                         if new_input_url and upload_url:
+                                             from app.pipeline.catalog import GENERIC_PYTHON_ENTRYPOINT
+                                             cmd = GENERIC_PYTHON_ENTRYPOINT.replace("{INPUT}", final_entry_file)
+                                             cmd = cmd.replace("{INPUT_URL}", new_input_url)
+                                             cmd = cmd.replace("{UPLOAD_URL}", upload_url)
+                                             
+                                             setup = gen_result.setup_commands.strip()
+                                             if setup:
+                                                 cmd = f"{setup} && {cmd}"
+                                             
+                                             new_spec["command"] = cmd
+                                     ch.spec = new_spec
                                 
                                 await send_customer_update(
                                     str(job.id), "catalog",

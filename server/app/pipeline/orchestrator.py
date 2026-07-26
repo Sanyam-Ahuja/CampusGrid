@@ -195,13 +195,27 @@ async def process_pipeline_async(job_id: str, user_id: str):
                         if info.is_dir():
                             continue
                         filename = info.filename.split("/")[-1]
-                        if filename in manifest_filenames:
+                        filename_lower = filename.lower()
+                        
+                        std_name = None
+                        if filename_lower == "cmakelists.txt":
+                            std_name = "CMakeLists.txt"
+                        elif filename_lower == "cargo.toml":
+                            std_name = "Cargo.toml"
+                        elif filename_lower == "makefile":
+                            std_name = "Makefile"
+                        elif filename_lower == "go.mod":
+                            std_name = "go.mod"
+                        elif filename_lower == "package.json":
+                            std_name = "package.json"
+
+                        if std_name:
                             try:
                                 content = z.read(info.filename)[:4096]
-                                build_files[filename] = content.decode('utf-8', errors='ignore')
+                                build_files[std_name] = content.decode('utf-8', errors='ignore')
                             except Exception:
                                 pass
-                        elif filename.lower() == "requirements.txt":
+                        elif filename_lower == "requirements.txt":
                             try:
                                 content = z.read(info.filename)[:4096]
                                 requirements_txt = content.decode('utf-8', errors='ignore')
@@ -214,13 +228,27 @@ async def process_pipeline_async(job_id: str, user_id: str):
                 # Check for manifest files in the flat upload
                 for key in file_keys:
                     filename = key.split("/")[-1]
-                    if filename in manifest_filenames:
+                    filename_lower = filename.lower()
+                    
+                    std_name = None
+                    if filename_lower == "cmakelists.txt":
+                        std_name = "CMakeLists.txt"
+                    elif filename_lower == "cargo.toml":
+                        std_name = "Cargo.toml"
+                    elif filename_lower == "makefile":
+                        std_name = "Makefile"
+                    elif filename_lower == "go.mod":
+                        std_name = "go.mod"
+                    elif filename_lower == "package.json":
+                        std_name = "package.json"
+
+                    if std_name:
                         try:
                             content = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, key)[:4096]
-                            build_files[filename] = content.decode('utf-8', errors='ignore')
+                            build_files[std_name] = content.decode('utf-8', errors='ignore')
                         except Exception:
                             pass
-                    elif filename.lower() == "requirements.txt":
+                    elif filename_lower == "requirements.txt":
                         try:
                             content = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, key)[:4096]
                             requirements_txt = content.decode('utf-8', errors='ignore')

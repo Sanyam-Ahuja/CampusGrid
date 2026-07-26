@@ -169,24 +169,144 @@ async def process_pipeline_async(job_id: str, user_id: str):
             import io
             import zipfile
             from app.pipeline.catalog import GENERIC_PYTHON_ENTRYPOINT
-            
+
             # Fetch script code for context from zip or flat file
             zip_key = next((k for k in file_keys if k.endswith('.zip')), None)
             src_bytes = b""
+            build_files: dict[str, str] = {}
+            requirements_txt: str | None = None
+
+            # Build manifest filenames to search for
+            manifest_filenames = [
+                "CMakeLists.txt", "Cargo.toml", "Makefile", "go.mod", "package.json"
+            ]
+
             if zip_key:
                 zip_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, zip_key)
                 with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+                    # Read entry file source
                     try:
                         src_bytes = z.read(profile.entry_file)
                     except Exception:
                         pass
+
+                    # Extract build manifest files (first 4KB each)
+                    for info in z.infolist():
+                        if info.is_dir():
+                            continue
+                        filename = info.filename.split("/")[-1]
+                        if filename in manifest_filenames:
+                            try:
+                                content = z.read(info.filename)[:4096]
+                                build_files[filename] = content.decode('utf-8', errors='ignore')
+                            except Exception:
+                                pass
+                        elif filename.lower() == "requirements.txt":
+                            try:
+                                content = z.read(info.filename)[:4096]
+                                requirements_txt = content.decode('utf-8', errors='ignore')
+                            except Exception:
+                                pass
             else:
+                # Flat file upload
                 src_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, profile.entry_file)
-            
+
+                # Check for manifest files in the flat upload
+                for key in file_keys:
+                    filename = key.split("/")[-1]
+                    if filename in manifest_filenames:
+                        try:
+                            content = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, key)[:4096]
+                            build_files[filename] = content.decode('utf-8', errors='ignore')
+                        except Exception:
+                            pass
+                    elif filename.lower() == "requirements.txt":
+                        try:
+                            content = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, key)[:4096]
+                            requirements_txt = content.decode('utf-8', errors='ignore')
+                        except Exception:
+                            pass
+
             src_str = src_bytes.decode('utf-8', errors='ignore')
-            
+
             generator = DockerfileGenerator()
-            gen_result = await generator.generate(src_str, None, profile)
+            gen_result = await generator.generate(
+                src_str, requirements_txt, profile, build_files
+            )
+
+            # Handle wrapper script for compiled workloads
+            if gen_result.needs_wrapper and gen_result.wrapper_script:
+                wrapper_filename = "_campugrid_wrapper.py"
+
+                if zip_key:
+                    # Repack the zip with the wrapper script added
+                    await send_customer_update(
+                        job_id, "catalog",
+                        f"Generated Python wrapper for compiled workload. {gen_result.reasoning}"
+                    )
+
+                    # Download original zip
+                    original_zip_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, zip_key)
+
+                    # Create new zip with original contents + wrapper
+                    new_zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(io.BytesIO(original_zip_bytes)) as original_z:
+                        with zipfile.ZipFile(new_zip_buffer, "w", zipfile.ZIP_DEFLATED) as new_z:
+                            # Copy all files from original
+                            for info in original_z.infolist():
+                                if not info.is_dir():
+                                    new_z.writestr(info, original_z.read(info.filename))
+
+                            # Add wrapper script at root
+                            new_z.writestr(wrapper_filename, gen_result.wrapper_script)
+
+                    # Upload repacked zip
+                    new_zip_key = f"{job_id}/_campugrid_repacked.zip"
+                    new_zip_buffer.seek(0)
+                    minio_service.upload_bytes(
+                        settings.BUCKET_JOB_INPUTS,
+                        new_zip_key,
+                        new_zip_buffer.read(),
+                        "application/zip"
+                    )
+
+                    # Update profile to use the repacked zip and wrapper
+                    profile.split_params["minio_key"] = new_zip_key
+                    profile.entry_file = wrapper_filename
+
+                    logger.info(f"Repacked zip with wrapper: {new_zip_key}")
+                else:
+                    # Flat file upload - upload wrapper directly
+                    await send_customer_update(
+                        job_id, "catalog",
+                        f"Generated Python wrapper for compiled workload. {gen_result.reasoning}"
+                    )
+
+                    wrapper_key = f"{job_id}/{wrapper_filename}"
+                    minio_service.upload_bytes(
+                        settings.BUCKET_JOB_INPUTS,
+                        wrapper_key,
+                        gen_result.wrapper_script.encode('utf-8'),
+                        "text/x-python"
+                    )
+
+                    # Update profile: minio_key points to wrapper, entry_file is bare filename
+                    profile.split_params["minio_key"] = wrapper_key
+                    profile.entry_file = wrapper_filename  # bare filename for entrypoint template
+
+                    logger.info(f"Uploaded wrapper script: {wrapper_key}")
+
+                await send_customer_update(
+                    job_id, "catalog",
+                    f"Wrapper configured for build+run (base {gen_result.base_image})."
+                )
+            else:
+                # No wrapper needed - standard Python workload
+                await send_customer_update(
+                    job_id, "catalog",
+                    f"Generated container config (base {gen_result.base_image})."
+                )
+
             cat_entry = CatalogEntry(
                 image=gen_result.base_image,
                 entrypoint_template=GENERIC_PYTHON_ENTRYPOINT,
@@ -196,7 +316,6 @@ async def process_pipeline_async(job_id: str, user_id: str):
                 tested=False,
                 setup_commands=gen_result.setup_commands,
             )
-            await send_customer_update(job_id, "catalog", f"Generated container config (base {gen_result.base_image}).")
         except Exception as e:
             logger.error(f"Gemini container generation failed for {job_id}: {e}. Pausing pipeline.")
             async with make_celery_session() as session:

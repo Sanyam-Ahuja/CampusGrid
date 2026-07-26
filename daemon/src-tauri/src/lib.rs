@@ -12,9 +12,8 @@ use serde::Serialize;
 pub struct AppState {
     pub is_active: Arc<AtomicBool>,
     pub is_logged_in: Arc<AtomicBool>,
-    // True while a workload container is running on this node. Drives heartbeat
-    // availability so the server doesn't dispatch a second chunk to a busy node.
     pub is_busy: Arc<AtomicBool>,
+    pub ws_sender: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<tokio_tungstenite::tungstenite::protocol::Message>>>>,
 }
 
 /// Check if credentials file exists and has content
@@ -347,6 +346,7 @@ pub fn run() {
                 is_active: Arc::new(AtomicBool::new(true)),
                 is_logged_in: Arc::new(AtomicBool::new(logged_in)),
                 is_busy: Arc::new(AtomicBool::new(false)),
+                ws_sender: Arc::new(tokio::sync::Mutex::new(None)),
             });
 
             // Start websocket loop only if credentials exist

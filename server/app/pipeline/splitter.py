@@ -82,7 +82,7 @@ def split_render(profile: JobProfile, available_nodes: int, catalog_entry, job_i
         settings = get_settings()
 
         minio_key = profile.split_params.get("minio_key", profile.entry_file)
-        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=4)
+        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=168)
 
         if is_single_node:
             # Single-node: upload the final .mp4 directly
@@ -91,7 +91,7 @@ def split_render(profile: JobProfile, available_nodes: int, catalog_entry, job_i
             # Multi-node: upload raw frames; a separate assembly chunk will compile
             output_key = f"{job_id}/chunk_{i}.tar.gz"
 
-        upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=4)
+        upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=168)
 
         cmd = catalog_entry.entrypoint_template.replace("{INPUT}", profile.entry_file)
         cmd = cmd.replace("{INPUT_URL}", input_url)
@@ -149,7 +149,7 @@ def build_assembly_chunk_spec(job_id: str, render_chunk_count: int) -> ChunkSpec
         minio_service.get_presigned_url(
             settings.BUCKET_JOB_OUTPUTS,
             f"{job_id}/chunk_{i}.tar.gz",
-            expiry_hours=6,
+            expiry_hours=168,
         )
         for i in range(render_chunk_count)
     ]
@@ -158,7 +158,7 @@ def build_assembly_chunk_spec(job_id: str, render_chunk_count: int) -> ChunkSpec
     final_upload_url = minio_service.get_presigned_upload_url(
         settings.BUCKET_JOB_OUTPUTS,
         f"{job_id}/final_render.mp4",
-        expiry_hours=6,
+        expiry_hours=168,
     )
 
     assembly_cmd = build_assembly_command(chunk_download_urls, final_upload_url)
@@ -193,9 +193,9 @@ def split_ml(profile: JobProfile, available_nodes: int, catalog_entry, job_id: s
         settings = get_settings()
 
         minio_key = profile.split_params.get("minio_key", profile.entry_file)
-        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=4)
+        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=168)
         output_key = f"{job_id}/chunk_{i}.tar.gz"
-        upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=4)
+        upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=168)
 
         cmd = catalog_entry.entrypoint_template.replace("{INPUT}", profile.entry_file)
         cmd = cmd.replace("{INPUT_URL}", input_url).replace("{UPLOAD_URL}", upload_url)
@@ -233,9 +233,9 @@ def split_data(profile: JobProfile, available_nodes: int, catalog_entry, job_id:
         # path does (.replace, not .format) so the {INPUT_URL}/{UPLOAD_URL}
         # placeholders in the template don't blow up with KeyError.
         minio_key = profile.split_params.get("minio_key", profile.entry_file)
-        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=4)
+        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=168)
         output_key = f"{job_id}/chunk_0.tar.gz"
-        upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=4)
+        upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=168)
 
         cmd = (catalog_entry.entrypoint_template
                .replace("{INPUT}", profile.entry_file)
@@ -264,9 +264,9 @@ def split_data(profile: JobProfile, available_nodes: int, catalog_entry, job_id:
         settings = get_settings()
 
         minio_key = profile.split_params.get("minio_key", profile.entry_file)
-        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=4)
+        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=168)
         output_key = f"{job_id}/chunk_{i}.tar.gz"
-        upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=4)
+        upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=168)
 
         cmd = catalog_entry.entrypoint_template.replace("{INPUT}", profile.entry_file).replace("{CHUNK_START}", str(start_byte)).replace("{CHUNK_END}", str(end_byte)).replace("{OUTPUT_PATH}", "/output")
         cmd = cmd.replace("{INPUT_URL}", input_url).replace("{UPLOAD_URL}", upload_url)
@@ -335,9 +335,9 @@ def split_simulation(profile: JobProfile, available_nodes: int, catalog_entry, j
         settings = get_settings()
 
         minio_key = profile.split_params.get("minio_key", profile.entry_file)
-        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=4)
+        input_url = minio_service.get_presigned_url(settings.BUCKET_JOB_INPUTS, minio_key, expiry_hours=168)
         output_key = f"{job_id}/chunk_{i}.tar.gz"
-        upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=4)
+        upload_url = minio_service.get_presigned_upload_url(settings.BUCKET_JOB_OUTPUTS, output_key, expiry_hours=168)
 
         cmd = cmd.replace("{INPUT_URL}", input_url).replace("{UPLOAD_URL}", upload_url)
 

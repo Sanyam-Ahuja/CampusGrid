@@ -47,15 +47,20 @@ pub async fn connect_and_listen(app_handle: tauri::AppHandle, node_id: String, a
     // Spawn a persistent task to forward queued messages to the currently active WebSocket.
     tokio::spawn(async move {
         while let Some(msg) = rx_out.recv().await {
-            let opt_w = {
-                let lock = active_writer_for_router.lock().await;
-                lock.clone()
-            };
-            if let Some(w) = opt_w {
-                let mut w_lock = w.lock().await;
-                if let Err(e) = w_lock.send(msg).await {
-                    println!("Error sending message through active WebSocket: {}", e);
+            loop {
+                let opt_w = {
+                    let lock = active_writer_for_router.lock().await;
+                    lock.clone()
+                };
+                if let Some(w) = opt_w {
+                    let mut w_lock = w.lock().await;
+                    if let Ok(_) = w_lock.send(msg.clone()).await {
+                        break; // Sent successfully, proceed to next message
+                    }
+                    println!("Active WebSocket write failed. Retrying...");
                 }
+                // WebSocket is either down or just died. Wait 2 seconds and retry.
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
     });

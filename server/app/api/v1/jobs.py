@@ -41,7 +41,12 @@ async def submit_job(
         )
 
     job_id = uuid4()
-    input_path = f"{job_id}"
+    input_filename = files[0].filename
+    for file in files:
+        if file.filename.endswith(".zip"):
+            input_filename = file.filename
+            break
+    input_path = f"{job_id}/{input_filename}"
 
     # Upload files to MinIO
     for file in files:

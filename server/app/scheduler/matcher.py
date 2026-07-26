@@ -485,10 +485,22 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str, error_log: str
                                 )
                     except Exception as fallback_err:
                         logger.error(f"Failed to run Gemini fallback for chunk {chunk_id}: {fallback_err}")
+                        chunk.status = ChunkStatus.FAILED
+                        job_result = await session.execute(select(Job).where(Job.id == chunk.job_id))
+                        job = job_result.scalar_one_or_none()
+                        if job and job.status not in (JobStatus.FAILED, JobStatus.CANCELLED):
+                            job.status = JobStatus.FAILED
+                        
+                        from app.pipeline.orchestrator import send_customer_update
+                        await send_customer_update(
+                            str(chunk.job_id), "failed",
+                            f"AI Fallback Generation Failed: {fallback_err}"
+                        )
 
-                await redis_svc.push_chunk(str(chunk.id), priority="high")
-                requeued = True
-                logger.warning(f"Chunk {chunk_id} failed on node {node_id}; requeued (retry {chunk.retry_count}/{MAX_CHUNK_RETRIES})")
+                if chunk.status == ChunkStatus.PENDING:
+                    await redis_svc.push_chunk(str(chunk.id), priority="high")
+                    requeued = True
+                    logger.warning(f"Chunk {chunk_id} failed on node {node_id}; requeued (retry {chunk.retry_count}/{MAX_CHUNK_RETRIES})")
 
         await session.commit()
 

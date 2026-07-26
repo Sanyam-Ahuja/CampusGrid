@@ -417,6 +417,8 @@ async def process_pipeline_async(job_id: str, user_id: str):
             job.type = JobType(profile.type)
             job.status = JobStatus.QUEUED
             job.container_image = cat_entry.image
+            if profile.split_params and "minio_key" in profile.split_params:
+                job.input_path = profile.split_params["minio_key"]
             job.profile = {
                 "type": profile.type,
                 "framework": profile.framework,

@@ -329,7 +329,7 @@ def chunk_success(chunk_id: str, node_id: str):
     async_to_sync(process_chunk_success_async)(chunk_id, node_id)
 
 
-async def process_chunk_failed_async(chunk_id: str, node_id: str):
+async def process_chunk_failed_async(chunk_id: str, node_id: str, error_log: str | None = None):
     r = aioredis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
     redis_svc = RedisService(r)
     requeued = False
@@ -421,7 +421,7 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str):
 
                                 from app.pipeline.generator import DockerfileGenerator
                                 generator = DockerfileGenerator()
-                                gen_result = await generator.generate(src_str, requirements_txt, profile)
+                                gen_result = await generator.generate(src_str, requirements_txt, profile, error_log=error_log)
                                 
                                 # Update job container image
                                 job.container_image = gen_result.base_image
@@ -499,8 +499,8 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str):
 
 
 @celery.task(name="scheduler.chunk_failed")
-def chunk_failed(chunk_id: str, node_id: str):
-    async_to_sync(process_chunk_failed_async)(chunk_id, node_id)
+def chunk_failed(chunk_id: str, node_id: str, error_log: str | None = None):
+    async_to_sync(process_chunk_failed_async)(chunk_id, node_id, error_log)
 
 
 async def process_requeue_chunk_async(chunk_id: str):

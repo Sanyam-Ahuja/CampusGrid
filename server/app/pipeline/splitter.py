@@ -33,13 +33,13 @@ def compute_chunks(profile: JobProfile, available_nodes: int, catalog_entry, req
     else:
         chunks = []
 
-    # Prepend any runtime dependency-install commands (Tier-2 adapter / Tier-3
-    # generator / custom Dockerfile) so they run inside the container before the
-    # workload. This is what lets us use real base images with no registry.
+    # Inject setup_commands into the {SETUP_COMMANDS} placeholder in the entrypoint.
+    # This ensures unzip/curl are installed FIRST (before setup) and extraction
+    # happens before setup_commands run — Gemini's setup can't break the unzip step.
     setup = (getattr(catalog_entry, "setup_commands", "") or "").strip()
-    if setup:
-        for c in chunks:
-            c.command = f"{setup} && {c.command}"
+    for c in chunks:
+        setup_fragment = f"&& {setup} " if setup else ""
+        c.command = c.command.replace("{SETUP_COMMANDS}", setup_fragment)
     return chunks
 
 def split_render(profile: JobProfile, available_nodes: int, catalog_entry, job_id: str) -> list[ChunkSpec]:

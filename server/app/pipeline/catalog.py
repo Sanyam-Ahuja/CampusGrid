@@ -91,13 +91,17 @@ def build_assembly_command(chunk_download_urls: list[str], final_upload_url: str
 
 # Generic entrypoint for Gemini-generated / custom-Dockerfile Python jobs:
 # pull input, run the detected script, push output. Dependency installs are
-# injected via CatalogEntry.setup_commands.
+# injected via the {SETUP_COMMANDS} placeholder which is expanded at dispatch time.
+# IMPORTANT: unzip+curl are installed FIRST (before setup_commands) so that
+# Gemini's setup_commands cannot break the extraction step (e.g. by running
+# apt-get clean / rm -rf /var/lib/apt/lists/*).
 GENERIC_PYTHON_ENTRYPOINT = (
     "apt-get install -y unzip curl -qq 2>/dev/null || true "
     "&& curl -sL '{INPUT_URL}' -o /tmp/input_archive "
     "&& mkdir -p /input "
     "&& (unzip -o /tmp/input_archive -d /input 2>/dev/null || cp /tmp/input_archive /input/{INPUT}) "
     "&& mkdir -p /output/checkpoints "
+    "{SETUP_COMMANDS}"
     "&& cd /input && if [ -d \"/input/$(dirname '{INPUT}')\" ]; then cd \"/input/$(dirname '{INPUT}')\"; fi && python $(basename '{INPUT}') "
     "&& tar -czf /tmp/output.tar.gz -C /output . "
     "&& curl -T /tmp/output.tar.gz '{UPLOAD_URL}'"

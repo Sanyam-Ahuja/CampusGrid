@@ -23,11 +23,11 @@ settings = get_settings()
 
 # Max times a chunk is retried on a different node before the job is failed.
 # Kept in sync with JobWatchdog.MAX_RETRIES.
-MAX_CHUNK_RETRIES = 3
+MAX_CHUNK_RETRIES = 7
 
 # Max times we call Gemini to re-generate the wrapper/config on failure.
 # Each attempt feeds the previous error log + wrapper script back to Gemini.
-MAX_GEMINI_RETRIES = 3
+MAX_GEMINI_RETRIES = 7
 
 
 def score_node(resources: dict, chunk_spec: dict) -> float:
@@ -579,8 +579,8 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str, error_log: str
                                              cmd = cmd.replace("{UPLOAD_URL}", upload_url)
                                              
                                              setup = gen_result.setup_commands.strip()
-                                             if setup:
-                                                 cmd = f"{setup} && {cmd}"
+                                             setup_fragment = f"&& {setup} " if setup else ""
+                                             cmd = cmd.replace("{SETUP_COMMANDS}", setup_fragment)
                                              
                                              new_spec["command"] = cmd
                                      ch.spec = new_spec

@@ -28,11 +28,12 @@ MAX_CHUNK_RETRIES = 3
 
 def score_node(resources: dict, chunk_spec: dict) -> float:
     """Higher score = better match."""
-    # VRAM match ensures they don't crash
-    if resources.get("gpu_vram_gb", 0) < chunk_spec.get("vram_gb", 0):
+    # VRAM match ensures they don't crash (with a 0.1 GB margin for slight system reporting differences)
+    if resources.get("gpu_vram_gb", 0) < (chunk_spec.get("vram_gb", 0) - 0.1):
         return -1.0
 
-    if resources.get("ram_gb", 0) < chunk_spec.get("ram_gb", 0):
+    # RAM check (with a 0.5 GB margin for system driver/OS reservation overhead)
+    if resources.get("ram_gb", 0) < (chunk_spec.get("ram_gb", 0) - 0.5):
         return -1.0
 
     score = 100.0

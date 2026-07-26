@@ -410,56 +410,77 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str):
                                     
                                 src_str = src_bytes.decode("utf-8", errors="ignore")
                                 
+                                # Notify the frontend in real-time about the transition
+                                from app.pipeline.orchestrator import send_customer_update
+                                await send_customer_update(
+                                    str(job.id), "catalog",
+                                    f"Failing pre-verified matches. Falling back to Tier 3: Generating custom container config via Gemini..."
+                                )
+
                                 from app.pipeline.generator import DockerfileGenerator
                                 generator = DockerfileGenerator()
                                 gen_result = await generator.generate(src_str, requirements_txt, profile)
                                 
-                                new_spec = dict(chunk.spec) if chunk.spec else {}
-                                new_spec["image"] = gen_result.base_image
-                                
-                                old_command = new_spec.get("command", "")
-                                if old_command:
-                                    # Extract presigned URLs
-                                    input_url = ""
-                                    idx = old_command.find("-sL '")
-                                    if idx != -1:
-                                        end_idx = old_command.find("'", idx + 5)
-                                        if end_idx != -1:
-                                            input_url = old_command[idx + 5:end_idx]
-                                            
-                                    upload_url = ""
-                                    idx_upload = old_command.find("-T /tmp/output.tar.gz '")
-                                    offset = len("-T /tmp/output.tar.gz '")
-                                    if idx_upload == -1:
-                                        idx_upload = old_command.find("--upload-file /tmp/final_render.mp4 '")
-                                        offset = len("--upload-file /tmp/final_render.mp4 '")
-                                    if idx_upload == -1:
-                                        idx_upload = old_command.find("-T ")
-                                        if idx_upload != -1:
-                                            quote_idx = old_command.find("'", idx_upload)
-                                            if quote_idx != -1:
-                                                idx_upload = quote_idx
-                                                offset = 1
-                                    if idx_upload != -1:
-                                        end_idx = old_command.find("'", idx_upload + offset)
-                                        if end_idx != -1:
-                                            upload_url = old_command[idx_upload + offset:end_idx]
-                                            
-                                    if input_url and upload_url:
-                                        from app.pipeline.catalog import GENERIC_PYTHON_ENTRYPOINT
-                                        cmd = GENERIC_PYTHON_ENTRYPOINT.replace("{INPUT}", entry_file)
-                                        cmd = cmd.replace("{INPUT_URL}", input_url)
-                                        cmd = cmd.replace("{UPLOAD_URL}", upload_url)
-                                        
-                                        setup = gen_result.setup_commands.strip()
-                                        if setup:
-                                            cmd = f"{setup} && {cmd}"
-                                        
-                                        new_spec["command"] = cmd
-                                        logger.info(f"Fallback command built successfully: {cmd[:150]}...")
-                                
-                                chunk.spec = new_spec
+                                # Update job container image
                                 job.container_image = gen_result.base_image
+                                
+                                # Fetch all chunks for this job to update all of them consistently
+                                all_chunks_res = await session.execute(select(Chunk).where(Chunk.job_id == job.id))
+                                all_chunks = all_chunks_res.scalars().all()
+                                
+                                for ch in all_chunks:
+                                    if ch.is_assembly:
+                                        continue
+                                    
+                                    new_spec = dict(ch.spec) if ch.spec else {}
+                                    new_spec["image"] = gen_result.base_image
+                                    
+                                    old_command = new_spec.get("command", "")
+                                    if old_command:
+                                        # Extract presigned URLs
+                                        input_url = ""
+                                        idx = old_command.find("-sL '")
+                                        if idx != -1:
+                                            end_idx = old_command.find("'", idx + 5)
+                                            if end_idx != -1:
+                                                input_url = old_command[idx + 5:end_idx]
+                                                
+                                        upload_url = ""
+                                        idx_upload = old_command.find("-T /tmp/output.tar.gz '")
+                                        offset = len("-T /tmp/output.tar.gz '")
+                                        if idx_upload == -1:
+                                            idx_upload = old_command.find("--upload-file /tmp/final_render.mp4 '")
+                                            offset = len("--upload-file /tmp/final_render.mp4 '")
+                                        if idx_upload == -1:
+                                            idx_upload = old_command.find("-T ")
+                                            if idx_upload != -1:
+                                                quote_idx = old_command.find("'", idx_upload)
+                                                if quote_idx != -1:
+                                                    idx_upload = quote_idx
+                                                    offset = 1
+                                        if idx_upload != -1:
+                                            end_idx = old_command.find("'", idx_upload + offset)
+                                            if end_idx != -1:
+                                                upload_url = old_command[idx_upload + offset:end_idx]
+                                                
+                                        if input_url and upload_url:
+                                            from app.pipeline.catalog import GENERIC_PYTHON_ENTRYPOINT
+                                            cmd = GENERIC_PYTHON_ENTRYPOINT.replace("{INPUT}", entry_file)
+                                            cmd = cmd.replace("{INPUT_URL}", input_url)
+                                            cmd = cmd.replace("{UPLOAD_URL}", upload_url)
+                                            
+                                            setup = gen_result.setup_commands.strip()
+                                            if setup:
+                                                cmd = f"{setup} && {cmd}"
+                                            
+                                            new_spec["command"] = cmd
+                                            
+                                    ch.spec = new_spec
+                                
+                                await send_customer_update(
+                                    str(job.id), "catalog",
+                                    f"Successfully migrated job to custom base image: {gen_result.base_image}"
+                                )
                     except Exception as fallback_err:
                         logger.error(f"Failed to run Gemini fallback for chunk {chunk_id}: {fallback_err}")
 

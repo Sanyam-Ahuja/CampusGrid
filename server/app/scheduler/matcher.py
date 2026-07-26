@@ -363,6 +363,101 @@ async def process_chunk_failed_async(chunk_id: str, node_id: str):
                 chunk.retry_count += 1
                 chunk.status = ChunkStatus.PENDING
                 chunk.node_id = None
+
+                # FALLBACK TO TIER 3: If we have failed twice, let's try regenerating using the Gemini pipeline!
+                if chunk.retry_count == 2 and not chunk.is_assembly:
+                    try:
+                        logger.info(f"Chunk {chunk_id} failed twice. Running Gemini fallback to regenerate container config...")
+                        job_result = await session.execute(select(Job).where(Job.id == chunk.job_id))
+                        job = job_result.scalar_one_or_none()
+                        if job and job.profile and job.input_path:
+                            entry_file = job.profile.get("entry_file", "")
+                            if entry_file:
+                                from app.pipeline.analyzer import JobProfile
+                                profile = JobProfile(
+                                    type=job.type.value if job.type else "ml_training",
+                                    framework=job.profile.get("framework", "python"),
+                                    gpu_required=job.profile.get("gpu", False),
+                                    resources=None,
+                                    confidence=job.profile.get("confidence", 1.0),
+                                    entry_file=entry_file,
+                                    split_params=job.profile.get("split_keys", {})
+                                )
+                                
+                                from app.services.minio_service import minio_service
+                                src_bytes = b""
+                                requirements_txt = None
+                                build_files = {}
+                                
+                                if job.input_path.endswith(".zip"):
+                                    zip_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, job.input_path)
+                                    import zipfile, io
+                                    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+                                        if entry_file in z.namelist():
+                                            src_bytes = z.read(entry_file)[:8192]
+                                        for name in z.namelist():
+                                            if name.lower() == "requirements.txt":
+                                                requirements_txt = z.read(name).decode("utf-8", errors="ignore")[:4096]
+                                            elif name.split("/")[-1] in ("cargo.toml", "package.json", "go.mod", "pom.xml", "build.gradle"):
+                                                build_files[name.split("/")[-1]] = z.read(name).decode("utf-8", errors="ignore")[:4096]
+                                else:
+                                    src_bytes = minio_service.download_bytes(settings.BUCKET_JOB_INPUTS, job.input_path)[:8192]
+                                    
+                                src_str = src_bytes.decode("utf-8", errors="ignore")
+                                
+                                from app.pipeline.generator import DockerfileGenerator
+                                generator = DockerfileGenerator()
+                                gen_result = await generator.generate(src_str, requirements_txt, profile, build_files)
+                                
+                                new_spec = dict(chunk.spec) if chunk.spec else {}
+                                new_spec["image"] = gen_result.base_image
+                                
+                                old_command = new_spec.get("command", "")
+                                if old_command:
+                                    # Extract presigned URLs
+                                    input_url = ""
+                                    idx = old_command.find("-sL '")
+                                    if idx != -1:
+                                        end_idx = old_command.find("'", idx + 5)
+                                        if end_idx != -1:
+                                            input_url = old_command[idx + 5:end_idx]
+                                            
+                                    upload_url = ""
+                                    idx_upload = old_command.find("-T /tmp/output.tar.gz '")
+                                    offset = len("-T /tmp/output.tar.gz '")
+                                    if idx_upload == -1:
+                                        idx_upload = old_command.find("--upload-file /tmp/final_render.mp4 '")
+                                        offset = len("--upload-file /tmp/final_render.mp4 '")
+                                    if idx_upload == -1:
+                                        idx_upload = old_command.find("-T ")
+                                        if idx_upload != -1:
+                                            quote_idx = old_command.find("'", idx_upload)
+                                            if quote_idx != -1:
+                                                idx_upload = quote_idx
+                                                offset = 1
+                                    if idx_upload != -1:
+                                        end_idx = old_command.find("'", idx_upload + offset)
+                                        if end_idx != -1:
+                                            upload_url = old_command[idx_upload + offset:end_idx]
+                                            
+                                    if input_url and upload_url:
+                                        from app.pipeline.catalog import GENERIC_PYTHON_ENTRYPOINT
+                                        cmd = GENERIC_PYTHON_ENTRYPOINT.replace("{INPUT}", entry_file)
+                                        cmd = cmd.replace("{INPUT_URL}", input_url)
+                                        cmd = cmd.replace("{UPLOAD_URL}", upload_url)
+                                        
+                                        setup = gen_result.setup_commands.strip()
+                                        if setup:
+                                            cmd = f"{setup} && {cmd}"
+                                        
+                                        new_spec["command"] = cmd
+                                        logger.info(f"Fallback command built successfully: {cmd[:150]}...")
+                                
+                                chunk.spec = new_spec
+                                job.container_image = gen_result.base_image
+                    except Exception as fallback_err:
+                        logger.error(f"Failed to run Gemini fallback for chunk {chunk_id}: {fallback_err}")
+
                 await redis_svc.push_chunk(str(chunk.id), priority="high")
                 requeued = True
                 logger.warning(f"Chunk {chunk_id} failed on node {node_id}; requeued (retry {chunk.retry_count}/{MAX_CHUNK_RETRIES})")

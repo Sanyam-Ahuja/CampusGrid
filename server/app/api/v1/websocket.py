@@ -208,9 +208,10 @@ async def ws_node_connection(
                         await ws_manager.broadcast_to_job(data["job_id"], data)
 
                 elif status == "failed":
-                    logger.warning(f"Node {node_id} failed chunk {chunk_id}: {data.get('error')}")
+                    error_log = data.get("error")
+                    logger.warning(f"Node {node_id} failed chunk {chunk_id}: {error_log}")
                     from app.scheduler.matcher import chunk_failed
-                    chunk_failed.delay(chunk_id, node_id)
+                    chunk_failed.delay(chunk_id, node_id, error_log=error_log)
                     
                     if data.get("job_id"):
                         await ws_manager.broadcast_to_job(data["job_id"], data)

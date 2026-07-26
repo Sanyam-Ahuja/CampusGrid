@@ -42,6 +42,7 @@ class DockerfileGenerator:
         requirements_txt: str | None,
         profile: JobProfile,
         build_files: dict[str, str] | None = None,
+        error_log: str | None = None,
     ) -> GenerationResult:
         """Pick a base image + dependency-install commands for an unknown codebase.
 
@@ -54,6 +55,7 @@ class DockerfileGenerator:
             profile: The JobProfile with entry_file, framework, gpu_required, etc.
             build_files: Optional dict mapping manifest filenames to their contents
                          (e.g. {"CMakeLists.txt": "...", "Cargo.toml": "..."}).
+            error_log: Optional error log traceback from a failed previous execution.
         """
         if build_files is None:
             build_files = {}
@@ -88,7 +90,20 @@ Entry file source (first 3000 chars, may be non-Python — read it to find the
 actual run command: CLI flags, model paths, arguments the repo's own README
 or Makefile would normally pass):
 {source_code[:3000]}
+"""
 
+        if error_log:
+            prompt += f"""
+PREVIOUS CONTAINER RUN FAILURE DETECTED:
+The previous attempt to run this workload failed with the following traceback/error log:
+<error_log>
+{error_log}
+</error_log>
+
+IMPORTANT: You must analyze the above error logs carefully (e.g. check for missing compilers, system libraries, package manager errors, requirements.txt path errors, or Python ModuleNotFoundErrors). Adjust your `base_image` selection (e.g. choose a base image with compiler tools pre-installed like build-essential or cmake, or a devel image if it is a CUDA build) or add the necessary installation commands to `setup_commands` to resolve the traceback/error in this retry.
+"""
+
+        prompt += f"""
 YOUR TASK — decide ONE of two paths:
 
 PATH A — entry_file is already valid, directly-runnable Python (`python
